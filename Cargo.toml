@@ -1,0 +1,31 @@
+[package]
+name = "pinetime-rtic"
+version = "0.1.0"
+authors = ["Danilo Bargen <mail@dbrgn.ch>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/dbrgn/pinetime-rtic/"
+
+[dependencies]
+cortex-m = "0.6"
+cortex-m-rt = "0.6"
+cortex-m-rtic = "0.5.1"
+debouncr = "0.1.2"
+embedded-graphics = "0.6"
+embedded-hal = "0.2"
+nrf52832-hal = { version = "0.10", features = ["rt"], default-features = false }
+numtoa = "0.2"
+panic-rtt-target = { version = "0.1", features = ["cortex-m"] }
+rtt-target = { version = "0.1", features = ["cortex-m"] }
+rubble = { git = "https://github.com/jonas-schievink/rubble" }
+rubble-nrf5x = { git = "https://github.com/jonas-schievink/rubble", features = ["52832"], default-features = false }
+st7789 = { version = "0.2", features = ["graphics", "batch", "buffer"], default-features = false }
+
+[profile.dev]
+codegen-units = 1
+
+[profile.release]
+lto = true
+debug = true
+codegen-units = 1
