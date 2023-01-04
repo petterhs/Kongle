@@ -1,0 +1,5 @@
+init
+
+program ./pinetime-mcuboot-app-image-1.8.0.bin verify 0x00008000
+
+reset

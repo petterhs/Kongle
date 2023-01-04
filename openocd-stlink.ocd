@@ -1,0 +1,8 @@
+source [find interface/stlink.cfg]
+
+gdb_flash_program enable
+gdb_breakpoint_override hard
+
+source [find target/nrf52.cfg]
+
+reset_config none separate

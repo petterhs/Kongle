@@ -2,7 +2,8 @@ use embedded_hal::adc::OneShot;
 use embedded_hal::digital::v2::InputPin;
 use nrf52832_hal::gpio::{p0, Floating, Input};
 use nrf52832_hal::saadc::{Saadc, SaadcConfig};
-use nrf52832_hal::target::SAADC;
+use nrf52832_hal::pac::SAADC;
+use core::option::Option;
 
 pub struct BatteryStatus {
     /// Pin P0.12: High = battery, Low = charging.
@@ -49,11 +50,11 @@ impl BatteryStatus {
     fn convert_adc_measurement(raw_measurement: i16) -> Option<u8> {
         if raw_measurement < 0 {
             // What?
-            return None;
+            return Option::None;
         }
         let adc_val: u32 = (raw_measurement as u16).into(); // keep as 32bit for multiplication
         let battery_voltage: u32 = (adc_val * 2000) / 4965; // we multiply the ADC value by 2 * 1000 for mV and divide by (2 ^ 14 / 3.3V reference)
-        Some((battery_voltage / 100) as u8)
+        Option::Some((battery_voltage / 100) as u8)
     }
 
     /// Return whether the watch is currently charging.

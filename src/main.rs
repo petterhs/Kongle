@@ -1,36 +1,54 @@
+// #![deny(unsafe_code)]
+// #![deny(warnings)]
 #![no_main]
-#![cfg_attr(not(test), no_std)]
-
+#![no_std]
+// #![cfg_attr(not(test))]
+// #![warn(rust_2018_idioms)]
 // Panic handler
 #[cfg(not(test))]
 use panic_rtt_target as _;
 
-use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
-use embedded_graphics::prelude::*;
+use crate::monotonic_nrf52::MonoTimer;
+
+use display_interface_spi::SPIInterfaceNoCS;
 use embedded_graphics::{
-    fonts::{Font12x16, Text},
+    prelude::*,
+    mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
+    text::{Text},
     image::{Image, ImageRawLE},
-    pixelcolor::Rgb565,
+    pixelcolor::{
+        Rgb565,
+    },
     primitives::rectangle::Rectangle,
-    style::{PrimitiveStyleBuilder, TextStyleBuilder},
+    primitives::PrimitiveStyleBuilder,
+    geometry::Point,
+    geometry::Size
 };
+use nrf52832_hal as hal;
 use nrf52832_hal::gpio::{p0, Floating, Input, Level, Output, Pin, PushPull};
 use nrf52832_hal::prelude::*;
-use nrf52832_hal::{self as hal, pac};
 use numtoa::NumToA;
 use rtic::app;
 use rtt_target::{rprintln, rtt_init_print};
-use rubble::config::Config;
-use rubble::gatt::BatteryServiceAttrs;
-use rubble::l2cap::{BleChannelMap, L2CAPState};
-use rubble::link::ad_structure::AdStructure;
-use rubble::link::queue::{PacketQueue, SimpleQueue};
-use rubble::link::{LinkLayer, Responder, MIN_PDU_BUF};
-use rubble::security::NoSecurity;
-use rubble::time::{Duration as RubbleDuration, Timer};
-use rubble_nrf5x::radio::{BleRadio, PacketBuffer};
-use rubble_nrf5x::timer::BleTimer;
-use rubble_nrf5x::utils::get_device_address;
+
+use rubble::{
+    config::Config,
+    l2cap::{BleChannelMap, L2CAPState},
+    link::{
+        ad_structure::AdStructure,
+        queue::{PacketQueue, SimpleQueue},
+        LinkLayer, Responder, MIN_PDU_BUF,
+    },
+    security::NoSecurity,
+    time::{Duration as RubbleDuration, Timer},
+    gatt::BatteryServiceAttrs,
+};
+use rubble_nrf5x::{
+    radio::{BleRadio, PacketBuffer},
+    timer::BleTimer,
+    utils::get_device_address,
+};
+
 use st7789::{self, Orientation};
 
 mod backlight;
@@ -38,7 +56,8 @@ mod battery;
 mod delay;
 mod monotonic_nrf52;
 
-use monotonic_nrf52::U32Ext;
+use monotonic_nrf52::ExtU32;
+use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
 
 const LCD_W: u16 = 240;
 const LCD_H: u16 = 240;
@@ -53,68 +72,69 @@ const BACKGROUND_COLOR: Rgb565 = Rgb565::new(0, 0b000111, 0);
 pub struct AppConfig {}
 
 impl Config for AppConfig {
-    type Timer = BleTimer<hal::target::TIMER2>;
+    type Timer = BleTimer<hal::pac::TIMER2>;
     type Transmitter = BleRadio;
     type ChannelMapper = BleChannelMap<BatteryServiceAttrs, NoSecurity>;
     type PacketQueue = &'static mut SimpleQueue;
 }
 
-#[app(device = nrf52832_hal::pac, peripherals = true, monotonic = crate::monotonic_nrf52::Tim1)]
-const APP: () = {
-    struct Resources {
-        // LCD
+#[app(device = crate::hal::pac, peripherals = true, dispatchers = [SWI0_EGU0,SWI1_EGU1,SWI2_EGU2,SWI3_EGU3,SWI4_EGU4,SWI5_EGU5])]
+mod app {
+
+    use super::*;
+
+    #[shared]
+    struct Shared {
         lcd: st7789::ST7789<
-            hal::spim::Spim<pac::SPIM1>,
-            p0::P0_18<Output<PushPull>>,
+            display_interface_spi::SPIInterfaceNoCS<hal::spim::Spim<hal::pac::SPIM1>, p0::P0_18<Output<PushPull>>>,
             p0::P0_26<Output<PushPull>>,
-            delay::TimerDelay,
-        >,
-        backlight: backlight::Backlight,
+            p0::P0_22<Output<PushPull>>,
+            >,
 
         // Battery
         battery: battery::BatteryStatus,
 
-        // Button
-        button: Pin<Input<Floating>>,
-        button_debouncer: Debouncer<u8, Repeat6>,
-
         // Styles
-        text_style: TextStyleBuilder<Rgb565, Font12x16>,
-
-        // Counter resources
-        #[init(0)]
-        counter: usize,
-
-        // Ferris resources
-        ferris: ImageRawLE<'static, Rgb565>,
-        #[init(10)]
-        ferris_x_offset: i32,
-        #[init(80)]
-        ferris_y_offset: i32,
-        #[init(2)]
-        ferris_step_size: i32,
+        // text_style: MonoTextStyleBuilder<'static,Rgb565>,
+        // text_style: MonoTextStyleBuilder<Rgb565>,
 
         // BLE
-        #[init([0; MIN_PDU_BUF])]
-        ble_tx_buf: PacketBuffer,
-        #[init([0; MIN_PDU_BUF])]
-        ble_rx_buf: PacketBuffer,
-        #[init(SimpleQueue::new())]
-        tx_queue: SimpleQueue,
-        #[init(SimpleQueue::new())]
-        rx_queue: SimpleQueue,
         radio: BleRadio,
         ble_ll: LinkLayer<AppConfig>,
         ble_r: Responder<AppConfig>,
     }
 
-    #[init(
-        resources = [ble_tx_buf, ble_rx_buf, tx_queue, rx_queue],
-        spawn = [write_counter, write_ferris, poll_button, show_battery_status, update_battery_status],
-    )]
-    fn init(cx: init::Context) -> init::LateResources {
+    #[local]
+    struct Local {
+        backlight: backlight::Backlight,
+    
+        // Ferris resources
+        ferris: ImageRawLE<'static,Rgb565>,
+        ferris_x_offset: i32,
+        ferris_y_offset: i32,
+        ferris_step_size: i32,
+
+        // Counter resources
+        counter: usize,
+
+        // Button
+        button: Pin<Input<Floating>>,
+        button_debouncer: Debouncer<u8, Repeat6>,
+    }
+
+    #[monotonic(binds = TIMER1, default = true)]
+    type Tonic = MonoTimer<hal::pac::TIMER1>;
+
+
+    // let buffer: &'static mut [u8; 1024] = cx.local.buffer;
+    #[init(local = [ble_tx_buf: PacketBuffer = [0; MIN_PDU_BUF], 
+        ble_rx_buf: PacketBuffer = [0; MIN_PDU_BUF],
+        tx_queue: SimpleQueue = SimpleQueue::new(),
+        rx_queue: SimpleQueue = SimpleQueue::new()
+        ])]
+    fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
         // Destructure device peripherals
-        let pac::Peripherals {
+        let hal::pac::Peripherals {
             CLOCK,
             FICR,
             P0,
@@ -137,10 +157,11 @@ const APP: () = {
         let _clocks = hal::clocks::Clocks::new(CLOCK).enable_ext_hfosc();
 
         // Set up delay provider on TIMER0
-        let delay = delay::TimerDelay::new(TIMER0);
+        let mut lcd_delay = delay::TimerDelay::new(TIMER0);
 
         // Initialize monotonic timer on TIMER1 (for RTIC)
-        monotonic_nrf52::Tim1::initialize(TIMER1);
+        // monotonic_nrf52::Tim1::initialize(TIMER1);
+        let mono = MonoTimer::new(TIMER1);
 
         // Initialize BLE timer on TIMER2
         let ble_timer = BleTimer::init(TIMER2);
@@ -175,13 +196,13 @@ const APP: () = {
         let mut radio = BleRadio::new(
             RADIO,
             &FICR,
-            cx.resources.ble_tx_buf,
-            cx.resources.ble_rx_buf,
+            cx.local.ble_tx_buf,
+            cx.local.ble_rx_buf,
         );
 
         // Create bluetooth TX/RX queues
-        let (tx, tx_cons) = cx.resources.tx_queue.split();
-        let (rx_prod, rx) = cx.resources.rx_queue.split();
+        let (tx, tx_cons) = cx.local.tx_queue.split();
+        let (rx_prod, rx) = cx.local.rx_queue.split();
 
         // Create the actual BLE stack objects
         let mut ble_ll = LinkLayer::<AppConfig>::new(device_address, ble_timer);
@@ -195,7 +216,7 @@ const APP: () = {
         let next_update = ble_ll
             .start_advertise(
                 RubbleDuration::from_millis(200),
-                &[AdStructure::CompleteLocalName("Rusty PineTime")],
+                &[AdStructure::CompleteLocalName("Kongle")],
                 &mut radio,
                 tx_cons,
                 rx_prod,
@@ -208,7 +229,7 @@ const APP: () = {
         let spi_mosi = gpio.p0_03.into_push_pull_output(Level::Low).degrade();
         let spi_miso = gpio.p0_04.into_floating_input().degrade();
         let spi_pins = hal::spim::Pins {
-            sck: spi_clk,
+            sck: Some(spi_clk),
             miso: Some(spi_miso),
             mosi: Some(spi_mosi),
         };
@@ -239,237 +260,280 @@ const APP: () = {
         // commands.
         lcd_cs.set_low().unwrap();
 
+        // display interface abstraction from SPI and DC
+        let di = SPIInterfaceNoCS::new(spi, lcd_dc);
+
+
         // Initialize LCD
-        let mut lcd = st7789::ST7789::new(spi, lcd_dc, lcd_rst, LCD_W, LCD_H, delay);
-        lcd.init().unwrap();
-        lcd.set_orientation(&Orientation::Portrait).unwrap();
+        let mut lcd = st7789::ST7789::new(di, Some(lcd_rst), None, LCD_W, LCD_H);
+        lcd.init(&mut lcd_delay).unwrap();
+        lcd.set_orientation(Orientation::Portrait).unwrap();
 
         // Draw something onto the LCD
         let backdrop_style = PrimitiveStyleBuilder::new()
             .fill_color(BACKGROUND_COLOR)
             .build();
-        Rectangle::new(Point::new(0, 0), Point::new(LCD_W as i32, LCD_H as i32))
+        Rectangle::new(Point::new(0, 0), Size::new(LCD_W as u32, LCD_H as u32))
             .into_styled(backdrop_style)
             .draw(&mut lcd)
             .unwrap();
 
         // Choose text style
-        let text_style = TextStyleBuilder::new(Font12x16)
+        // let text_style = TextStyleBuilder::new()
+        //     .font(&FONT_10X20)
+        //     .text_color(Rgb565::WHITE);
+        let text_style = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
             .text_color(Rgb565::WHITE)
-            .background_color(BACKGROUND_COLOR);
+            .build();
+
 
         // Draw text
-        Text::new("PineTime", Point::new(10, 10))
-            .into_styled(text_style.build())
+        Text::new("Kongle PineTime", Point::new(10, 20), text_style)
             .draw(&mut lcd)
             .unwrap();
 
         // Load ferris image data
-        let ferris = ImageRawLE::new(
-            include_bytes!("../ferris.raw"),
-            FERRIS_W as u32,
-            FERRIS_H as u32,
-        );
+        let ferris: ImageRawLE<Rgb565> = ImageRawLE::new(include_bytes!("../ferris.raw"), FERRIS_W as u32);
 
         // Schedule tasks immediately
-        cx.spawn.write_counter().unwrap();
-        cx.spawn.write_ferris().unwrap();
-        cx.spawn.poll_button().unwrap();
-        cx.spawn.show_battery_status().unwrap();
-        cx.spawn.update_battery_status().unwrap();
+        write_counter::spawn().unwrap();
+        write_ferris::spawn().unwrap();
+        poll_button::spawn().unwrap();
+        show_battery_status::spawn().unwrap();
+        update_battery_status::spawn().unwrap();
 
-        init::LateResources {
+
+        (Shared {
             lcd,
             battery,
-            backlight,
-            button,
-            button_debouncer: debounce_6(),
-            text_style,
-            ferris,
-
+            // text_style,
             radio,
             ble_ll,
             ble_r,
-        }
+        }, Local {
+            backlight,
+            ferris,
+            ferris_x_offset: 10,
+            ferris_y_offset: 80,
+            ferris_step_size: 2,
+
+            counter : 0,
+
+            button,
+            button_debouncer: debounce_6(false),
+        }, init::Monotonics(mono))
     }
 
     /// Hook up the RADIO interrupt to the Rubble BLE stack.
-    #[task(binds = RADIO, resources = [radio, ble_ll], spawn = [ble_worker], priority = 3)]
-    fn radio(cx: radio::Context) {
-        let ble_ll: &mut LinkLayer<AppConfig> = cx.resources.ble_ll;
-        if let Some(cmd) = cx
-            .resources
-            .radio
-            .recv_interrupt(ble_ll.timer().now(), ble_ll)
-        {
-            cx.resources.radio.configure_receiver(cmd.radio);
-            ble_ll.timer().configure_interrupt(cmd.next_update);
+    #[task(binds = RADIO, shared = [radio, ble_ll], priority = 3)]
+    fn radio(mut cx: radio::Context) {
 
-            if cmd.queued_work {
-                // If there's any lower-priority work to be done, ensure that happens.
-                // If we fail to spawn the task, it's already scheduled.
-                cx.spawn.ble_worker().ok();
-            }
-        }
+        cx.shared.ble_ll.lock(|ble_ll| {
+
+            cx.shared.radio.lock(|radio| {
+
+                    
+                if let Some(cmd) = radio
+                    .recv_interrupt(ble_ll.timer().now(), ble_ll)
+                {
+                    radio.configure_receiver(cmd.radio);
+                    ble_ll.timer().configure_interrupt(cmd.next_update);
+
+                    if cmd.queued_work {
+                        // If there's any lower-priority work to be done, ensure that happens.
+                        // If we fail to spawn the task, it's already scheduled.
+                        ble_worker::spawn().ok();
+                    }
+                }
+            });
+        });
     }
 
     /// Hook up the TIMER2 interrupt to the Rubble BLE stack.
-    #[task(binds = TIMER2, resources = [radio, ble_ll], spawn = [ble_worker], priority = 3)]
-    fn timer2(cx: timer2::Context) {
-        let timer = cx.resources.ble_ll.timer();
-        if !timer.is_interrupt_pending() {
-            return;
-        }
-        timer.clear_interrupt();
+    #[task(binds = TIMER2, shared = [radio, ble_ll], priority = 3)]
+    fn timer2(mut cx: timer2::Context) {
 
-        let cmd = cx.resources.ble_ll.update_timer(&mut *cx.resources.radio);
-        cx.resources.radio.configure_receiver(cmd.radio);
+        cx.shared.ble_ll.lock(|ble_ll| {
 
-        cx.resources
-            .ble_ll
-            .timer()
-            .configure_interrupt(cmd.next_update);
+            cx.shared.radio.lock(|radio| {
+                let timer = ble_ll.timer();
+                if !timer.is_interrupt_pending() {
+                    return;
+                }
+                timer.clear_interrupt();
+        
+                let cmd = ble_ll.update_timer(&mut *radio);
+                radio.configure_receiver(cmd.radio);
+        
+                
+                ble_ll.timer()
+                    .configure_interrupt(cmd.next_update);
+        
+                if cmd.queued_work {
+                    // If there's any lower-priority work to be done, ensure that happens.
+                    // If we fail to spawn the task, it's already scheduled.
+                    ble_worker::spawn().ok();
+                }
+            });
+        });
 
-        if cmd.queued_work {
-            // If there's any lower-priority work to be done, ensure that happens.
-            // If we fail to spawn the task, it's already scheduled.
-            cx.spawn.ble_worker().ok();
-        }
     }
 
     /// Lower-priority task spawned from RADIO and TIMER2 interrupts.
-    #[task(resources = [ble_r], priority = 2)]
-    fn ble_worker(cx: ble_worker::Context) {
+    #[task(shared = [ble_r], priority = 2)]
+    fn ble_worker(mut cx: ble_worker::Context) {
         // Fully drain the packet queue
-        while cx.resources.ble_r.has_work() {
-            cx.resources.ble_r.process_one().unwrap();
-        }
+        cx.shared.ble_r.lock(|ble_r| 
+            while ble_r.has_work() {
+                ble_r.process_one().unwrap();
+            }
+        )
     }
 
-    #[task(resources = [lcd, ferris, ferris_x_offset, ferris_y_offset, ferris_step_size], schedule = [write_ferris])]
-    fn write_ferris(cx: write_ferris::Context) {
+    #[task(shared = [lcd],
+        local = [ferris, ferris_x_offset, ferris_y_offset, ferris_step_size])]
+    fn write_ferris(mut cx: write_ferris::Context) {
         // Draw ferris
-        Image::new(
-            &cx.resources.ferris,
-            Point::new(*cx.resources.ferris_x_offset, *cx.resources.ferris_y_offset),
-        )
-        .draw(cx.resources.lcd)
-        .unwrap();
+        let image = Image::new(
+            cx.local.ferris,
+            Point::new(*cx.local.ferris_x_offset, *cx.local.ferris_y_offset),
+        );
+
+        cx.shared.lcd.lock(|lcd| {
+            image.draw(lcd).unwrap();
+        });
 
         // Clean up behind ferris
         let backdrop_style = PrimitiveStyleBuilder::new()
             .fill_color(BACKGROUND_COLOR)
             .build();
-        let (p1, p2) = if *cx.resources.ferris_step_size > 0 {
+        let (p1, p2) = if *cx.local.ferris_step_size > 0 {
             // Clean up to the left
             (
                 Point::new(
-                    *cx.resources.ferris_x_offset - *cx.resources.ferris_step_size,
-                    *cx.resources.ferris_y_offset,
+                    *cx.local.ferris_x_offset - (*cx.local.ferris_step_size as i32),
+                    *cx.local.ferris_y_offset,
                 ),
-                Point::new(
-                    *cx.resources.ferris_x_offset,
-                    *cx.resources.ferris_y_offset + (FERRIS_H as i32),
+                Size::new(
+                    *cx.local.ferris_step_size as u32,
+                    FERRIS_H as u32,
                 ),
             )
         } else {
             // Clean up to the right
             (
                 Point::new(
-                    *cx.resources.ferris_x_offset + FERRIS_W as i32,
-                    *cx.resources.ferris_y_offset,
+                    *cx.local.ferris_x_offset + FERRIS_W as i32,
+                    *cx.local.ferris_y_offset,
                 ),
-                Point::new(
-                    *cx.resources.ferris_x_offset + FERRIS_W as i32
-                        - *cx.resources.ferris_step_size,
-                    *cx.resources.ferris_y_offset + (FERRIS_H as i32),
+                Size::new(
+                    FERRIS_W as u32
+                        - (*cx.local.ferris_step_size as u32),
+                    FERRIS_H as u32,
                 ),
             )
         };
-        Rectangle::new(p1, p2)
-            .into_styled(backdrop_style)
-            .draw(cx.resources.lcd)
-            .unwrap();
+        
+        let rectangle = Rectangle::new(p1, p2)
+            .into_styled(backdrop_style);
+
+
+        cx.shared.lcd.lock(|lcd| {
+            rectangle.draw(lcd).unwrap();
+        });
 
         // Reset step size
-        if *cx.resources.ferris_x_offset as u16 > LCD_W - FERRIS_W - MARGIN {
-            *cx.resources.ferris_step_size = -*cx.resources.ferris_step_size;
-        } else if (*cx.resources.ferris_x_offset as u16) < MARGIN {
-            *cx.resources.ferris_step_size = -*cx.resources.ferris_step_size;
+        if *cx.local.ferris_x_offset as u16 > LCD_W - FERRIS_W - MARGIN {
+            *cx.local.ferris_step_size = -*cx.local.ferris_step_size;
+        } else if (*cx.local.ferris_x_offset as u16) < MARGIN {
+            *cx.local.ferris_step_size = -*cx.local.ferris_step_size;
         }
-        *cx.resources.ferris_x_offset += *cx.resources.ferris_step_size;
+        *cx.local.ferris_x_offset += *cx.local.ferris_step_size;
 
         // Re-schedule the timer interrupt
-        cx.schedule.write_ferris(cx.scheduled + 25.hz()).unwrap();
+        write_ferris::spawn_after(40.millis()).unwrap();
     }
 
-    #[task(resources = [lcd, text_style, counter], schedule = [write_counter])]
-    fn write_counter(cx: write_counter::Context) {
-        rprintln!("Counter is {}", cx.resources.counter);
+    #[task(shared = [lcd], local = [counter])]
+    fn write_counter(mut cx: write_counter::Context) {
+        rprintln!("Counter is {}", cx.local.counter);
 
         // Write counter to the display
         let mut buf = [0u8; 20];
-        let text = cx.resources.counter.numtoa_str(10, &mut buf);
-        Text::new(text, Point::new(10, LCD_H as i32 - 10 - 16))
-            .into_styled(cx.resources.text_style.build())
-            .draw(cx.resources.lcd)
-            .unwrap();
+        let text = cx.local.counter.numtoa_str(10, &mut buf);
+
+        let text_style = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(Rgb565::WHITE)
+            .background_color(BACKGROUND_COLOR)
+            .build();
+
+        let text = Text::new(text, Point::new(10, LCD_H as i32 - 10 - MARGIN as i32), text_style);
+
+        cx.shared.lcd.lock(|lcd| {
+            text.draw(lcd).unwrap();
+        });
 
         // Increment counter
-        *cx.resources.counter += 1;
+        *cx.local.counter += 1;
 
         // Re-schedule the timer interrupt
-        cx.schedule.write_counter(cx.scheduled + 1.secs()).unwrap();
+        write_counter::spawn_after(1000.millis()).unwrap();
     }
 
-    #[task(resources = [button, button_debouncer], spawn = [button_pressed], schedule = [poll_button])]
+    #[task(local = [button, button_debouncer])]
     fn poll_button(cx: poll_button::Context) {
         // Poll button
-        let pressed = cx.resources.button.is_high().unwrap();
-        let edge = cx.resources.button_debouncer.update(pressed);
+        let pressed = cx.local.button.is_high().unwrap();
+        let edge = cx.local.button_debouncer.update(pressed);
 
         // Dispatch event
         if edge == Some(Edge::Rising) {
-            cx.spawn.button_pressed().unwrap();
+            button_pressed::spawn().unwrap();
         }
 
         // Re-schedule the timer interrupt in 2ms
-        cx.schedule.poll_button(cx.scheduled + 2.millis()).unwrap();
+        poll_button::spawn_after(2.millis()).unwrap();
     }
 
     /// Called when button is pressed without bouncing for 12 (6 * 2) ms.
-    #[task(resources = [backlight])]
+    #[task(local = [backlight])]
     fn button_pressed(cx: button_pressed::Context) {
-        if cx.resources.backlight.get_brightness() < 7 {
-            cx.resources.backlight.brighter();
+        if cx.local.backlight.get_brightness() < 7 {
+            cx.local.backlight.brighter();
         } else {
-            cx.resources.backlight.off();
+            cx.local.backlight.off();
         }
     }
 
     /// Fetch the battery status from the hardware. Update the text if
     /// something changed.
-    #[task(resources = [battery], spawn = [show_battery_status], schedule = [update_battery_status])]
-    fn update_battery_status(cx: update_battery_status::Context) {
+    #[task(shared = [battery])]
+    fn update_battery_status(mut cx: update_battery_status::Context) {
         rprintln!("Update battery status");
 
-        let changed = cx.resources.battery.update();
+        let changed = cx.shared.battery.lock(|battery| battery.update());
         if changed {
             rprintln!("Battery status changed");
-            cx.spawn.show_battery_status().unwrap();
+            show_battery_status::spawn().unwrap();
         }
 
         // Re-schedule the timer interrupt in 1s
-        cx.schedule
-            .update_battery_status(cx.scheduled + 1.secs())
-            .unwrap();
+        update_battery_status::spawn_after(1000.millis()).unwrap();
     }
 
     /// Show the battery status on the LCD.
-    #[task(resources = [battery, lcd, text_style])]
-    fn show_battery_status(cx: show_battery_status::Context) {
-        let voltage = cx.resources.battery.voltage();
-        let charging = cx.resources.battery.is_charging();
+    #[task(shared = [battery, lcd])]
+    fn show_battery_status(mut cx: show_battery_status::Context) {
+        let mut voltage = 0;
+        let mut charging= false; 
+        
+        cx.shared.battery.lock(|battery| {
+            voltage = battery.voltage();
+            charging = battery.is_charging();
+
+        });
 
         rprintln!(
             "Battery status: {} ({})",
@@ -486,21 +550,25 @@ const APP: () = {
         buf[4] = b'/';
         buf[5] = if charging { b'C' } else { b'D' };
         let status = core::str::from_utf8(&buf).unwrap();
-        let text = Text::new(status, Point::zero()).into_styled(cx.resources.text_style.build());
-        let translation = Point::new(
-            LCD_W as i32 - text.size().width as i32 - MARGIN as i32,
-            MARGIN as i32,
+        
+
+        let text_style = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(Rgb565::WHITE)
+            .background_color(BACKGROUND_COLOR)
+            .build();
+
+        let text = Text::new(
+            status, Point::new(
+                LCD_W as i32 - 60 as i32 - MARGIN as i32,
+                LCD_H as i32 - 10 - MARGIN as i32,
+            ),
+            text_style,
         );
-        text.translate(translation).draw(cx.resources.lcd).unwrap();
+
+        cx.shared.lcd.lock(|lcd| {
+            text.draw(lcd).unwrap();
+        });
     }
 
-    // Provide unused interrupts to RTIC for its scheduling
-    extern "C" {
-        fn SWI0_EGU0();
-        fn SWI1_EGU1();
-        fn SWI2_EGU2();
-        fn SWI3_EGU3();
-        fn SWI4_EGU4();
-        fn SWI5_EGU5();
-    }
-};
+}
