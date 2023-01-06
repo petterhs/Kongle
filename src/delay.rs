@@ -4,11 +4,7 @@
 //! default also wants SYST for its Delay implementation.
 
 use embedded_hal::blocking::delay::DelayUs;
-use nrf52832_hal::{
-    self as hal,
-    pac,
-    timer::Timer,
-};
+use nrf52832_hal::{self as hal, pac, timer::Timer};
 
 pub struct TimerDelay {
     timer: hal::Timer<pac::TIMER0>,
