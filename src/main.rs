@@ -8,24 +8,13 @@
 #[cfg(not(test))]
 use panic_rtt_target as _;
 
-use crate::monotonic_nrf52::MonoTimer;
+use crate::monotonic_nrf52::{ExtU32, MonoTimer};
 
-use display_interface_spi::SPIInterfaceNoCS;
-use embedded_graphics::{
-    geometry::Point,
-    geometry::Size,
-    image::{Image, ImageRawLE},
-    mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
-    pixelcolor::Rgb565,
+use hal::{
+    gpio::{p0, Floating, Input, Level, Output, Pin, PushPull},
     prelude::*,
-    primitives::rectangle::Rectangle,
-    primitives::PrimitiveStyleBuilder,
-    text::Text,
 };
 use nrf52832_hal as hal;
-use nrf52832_hal::gpio::{p0, Floating, Input, Level, Output, Pin, PushPull};
-use nrf52832_hal::prelude::*;
-use numtoa::NumToA;
 use rtic::app;
 use rtt_target::{rprintln, rtt_init_print};
 
@@ -47,24 +36,33 @@ use rubble_nrf5x::{
     utils::get_device_address,
 };
 
+use display_interface_spi::SPIInterfaceNoCS;
+use embedded_graphics::{
+    geometry::Point,
+    geometry::Size,
+    image::{Image, ImageRawLE},
+    mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
+    pixelcolor::Rgb565,
+    prelude::*,
+    primitives::rectangle::Rectangle,
+    primitives::PrimitiveStyleBuilder,
+    text::Text,
+};
 use st7789::{self, Orientation};
+
+use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
+use numtoa::NumToA;
 
 mod backlight;
 mod battery;
 mod delay;
 mod monotonic_nrf52;
 
-use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
-use monotonic_nrf52::ExtU32;
-
 const LCD_W: u16 = 240;
 const LCD_H: u16 = 240;
-
 const FERRIS_W: u16 = 86;
 const FERRIS_H: u16 = 64;
-
 const MARGIN: u16 = 10;
-
 const BACKGROUND_COLOR: Rgb565 = Rgb565::new(0, 0b000111, 0);
 
 pub struct AppConfig {}
@@ -126,7 +124,6 @@ mod app {
     #[monotonic(binds = TIMER1, default = true)]
     type Tonic = MonoTimer<hal::pac::TIMER1>;
 
-    // let buffer: &'static mut [u8; 1024] = cx.local.buffer;
     #[init(local = [
         ble_tx_buf: PacketBuffer = [0; MIN_PDU_BUF], 
         ble_rx_buf: PacketBuffer = [0; MIN_PDU_BUF],
@@ -147,6 +144,14 @@ mod app {
             TIMER2,
             ..
         } = cx.device;
+
+        // Desctructure local resources
+        let init::LocalResources {
+            ble_tx_buf,
+            ble_rx_buf,
+            tx_queue,
+            rx_queue,
+        } = cx.local;
 
         // Init RTT
         rtt_init_print!();
@@ -194,11 +199,11 @@ mod app {
         rprintln!("Bluetooth device address: {:?}", device_address);
 
         // Initialize radio
-        let mut radio = BleRadio::new(RADIO, &FICR, cx.local.ble_tx_buf, cx.local.ble_rx_buf);
+        let mut radio = BleRadio::new(RADIO, &FICR, ble_tx_buf, ble_rx_buf);
 
         // Create bluetooth TX/RX queues
-        let (tx, tx_cons) = cx.local.tx_queue.split();
-        let (rx_prod, rx) = cx.local.rx_queue.split();
+        let (tx, tx_cons) = tx_queue.split();
+        let (rx_prod, rx) = rx_queue.split();
 
         // Create the actual BLE stack objects
         let mut ble_ll = LinkLayer::<AppConfig>::new(device_address, ble_timer);
@@ -325,9 +330,15 @@ mod app {
 
     /// Hook up the RADIO interrupt to the Rubble BLE stack.
     #[task(binds = RADIO, shared = [radio, ble_ll], priority = 3)]
-    fn radio(mut cx: radio::Context) {
-        cx.shared.ble_ll.lock(|ble_ll| {
-            cx.shared.radio.lock(|radio| {
+    fn radio(cx: radio::Context) {
+        //Destructure the shared resources
+        let radio::SharedResources {
+            mut radio,
+            mut ble_ll,
+        } = cx.shared;
+
+        ble_ll.lock(|ble_ll| {
+            radio.lock(|radio| {
                 if let Some(cmd) = radio.recv_interrupt(ble_ll.timer().now(), ble_ll) {
                     radio.configure_receiver(cmd.radio);
                     ble_ll.timer().configure_interrupt(cmd.next_update);
@@ -344,9 +355,15 @@ mod app {
 
     /// Hook up the TIMER2 interrupt to the Rubble BLE stack.
     #[task(binds = TIMER2, shared = [radio, ble_ll], priority = 3)]
-    fn timer2(mut cx: timer2::Context) {
-        cx.shared.ble_ll.lock(|ble_ll| {
-            cx.shared.radio.lock(|radio| {
+    fn timer2(cx: timer2::Context) {
+        //Destructure the shared resources
+        let timer2::SharedResources {
+            mut radio,
+            mut ble_ll,
+        } = cx.shared;
+
+        ble_ll.lock(|ble_ll| {
+            radio.lock(|radio| {
                 let timer = ble_ll.timer();
                 if !timer.is_interrupt_pending() {
                     return;
@@ -369,9 +386,12 @@ mod app {
 
     /// Lower-priority task spawned from RADIO and TIMER2 interrupts.
     #[task(shared = [ble_r], priority = 2)]
-    fn ble_worker(mut cx: ble_worker::Context) {
+    fn ble_worker(cx: ble_worker::Context) {
+        //Destructure the shared resources
+        let ble_worker::SharedResources { mut ble_r } = cx.shared;
+
         // Fully drain the packet queue
-        cx.shared.ble_r.lock(|ble_r| {
+        ble_r.lock(|ble_r| {
             while ble_r.has_work() {
                 ble_r.process_one().unwrap();
             }
@@ -380,14 +400,22 @@ mod app {
 
     #[task(shared = [lcd],
         local = [ferris, ferris_x_offset, ferris_y_offset, ferris_step_size])]
-    fn write_ferris(mut cx: write_ferris::Context) {
-        // Draw ferris
-        let image = Image::new(
-            cx.local.ferris,
-            Point::new(*cx.local.ferris_x_offset, *cx.local.ferris_y_offset),
-        );
+    fn write_ferris(cx: write_ferris::Context) {
+        //Destructure the shared resources
+        let write_ferris::SharedResources { mut lcd } = cx.shared;
 
-        cx.shared.lcd.lock(|lcd| {
+        //Destructure the local resources
+        let write_ferris::LocalResources {
+            ferris,
+            ferris_x_offset,
+            ferris_y_offset,
+            ferris_step_size,
+        } = cx.local;
+
+        // Draw ferris
+        let image = Image::new(ferris, Point::new(*ferris_x_offset, *ferris_y_offset));
+
+        lcd.lock(|lcd| {
             image.draw(lcd).unwrap();
         });
 
@@ -395,24 +423,21 @@ mod app {
         let backdrop_style = PrimitiveStyleBuilder::new()
             .fill_color(BACKGROUND_COLOR)
             .build();
-        let (p1, p2) = if *cx.local.ferris_step_size > 0 {
+        let (p1, p2) = if *ferris_step_size > 0 {
             // Clean up to the left
             (
                 Point::new(
-                    *cx.local.ferris_x_offset - (*cx.local.ferris_step_size as i32),
-                    *cx.local.ferris_y_offset,
+                    *ferris_x_offset - (*ferris_step_size as i32),
+                    *ferris_y_offset,
                 ),
-                Size::new(*cx.local.ferris_step_size as u32, FERRIS_H as u32),
+                Size::new(*ferris_step_size as u32, FERRIS_H as u32),
             )
         } else {
             // Clean up to the right
             (
-                Point::new(
-                    *cx.local.ferris_x_offset + FERRIS_W as i32,
-                    *cx.local.ferris_y_offset,
-                ),
+                Point::new(*ferris_x_offset + FERRIS_W as i32, *ferris_y_offset),
                 Size::new(
-                    FERRIS_W as u32 - (*cx.local.ferris_step_size as u32),
+                    FERRIS_W as u32 - (*ferris_step_size as u32),
                     FERRIS_H as u32,
                 ),
             )
@@ -420,29 +445,35 @@ mod app {
 
         let rectangle = Rectangle::new(p1, p2).into_styled(backdrop_style);
 
-        cx.shared.lcd.lock(|lcd| {
+        lcd.lock(|lcd| {
             rectangle.draw(lcd).unwrap();
         });
 
         // Reset step size
-        if *cx.local.ferris_x_offset as u16 > LCD_W - FERRIS_W - MARGIN {
-            *cx.local.ferris_step_size = -*cx.local.ferris_step_size;
-        } else if (*cx.local.ferris_x_offset as u16) < MARGIN {
-            *cx.local.ferris_step_size = -*cx.local.ferris_step_size;
+        if *ferris_x_offset as u16 > LCD_W - FERRIS_W - MARGIN {
+            *ferris_step_size = -*ferris_step_size;
+        } else if (*ferris_x_offset as u16) < MARGIN {
+            *ferris_step_size = -*ferris_step_size;
         }
-        *cx.local.ferris_x_offset += *cx.local.ferris_step_size;
+        *ferris_x_offset += *ferris_step_size;
 
         // Re-schedule the timer interrupt
         write_ferris::spawn_after(40.millis()).unwrap();
     }
 
     #[task(shared = [lcd], local = [counter])]
-    fn write_counter(mut cx: write_counter::Context) {
-        rprintln!("Counter is {}", cx.local.counter);
+    fn write_counter(cx: write_counter::Context) {
+        //Destructure the shared resources
+        let write_counter::SharedResources { mut lcd } = cx.shared;
+
+        //Destructure the local resources
+        let write_counter::LocalResources { counter } = cx.local;
+
+        rprintln!("Counter is {}", counter);
 
         // Write counter to the display
         let mut buf = [0u8; 20];
-        let text = cx.local.counter.numtoa_str(10, &mut buf);
+        let text = counter.numtoa_str(10, &mut buf);
 
         let text_style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
@@ -456,12 +487,12 @@ mod app {
             text_style,
         );
 
-        cx.shared.lcd.lock(|lcd| {
+        lcd.lock(|lcd| {
             text.draw(lcd).unwrap();
         });
 
         // Increment counter
-        *cx.local.counter += 1;
+        *counter += 1;
 
         // Re-schedule the timer interrupt
         write_counter::spawn_after(1000.millis()).unwrap();
@@ -469,9 +500,15 @@ mod app {
 
     #[task(local = [button, button_debouncer])]
     fn poll_button(cx: poll_button::Context) {
+        //Destructure the local resources
+        let poll_button::LocalResources {
+            button,
+            button_debouncer,
+        } = cx.local;
+
         // Poll button
-        let pressed = cx.local.button.is_high().unwrap();
-        let edge = cx.local.button_debouncer.update(pressed);
+        let pressed = button.is_high().unwrap();
+        let edge = button_debouncer.update(pressed);
 
         // Dispatch event
         if edge == Some(Edge::Rising) {
@@ -485,20 +522,26 @@ mod app {
     /// Called when button is pressed without bouncing for 12 (6 * 2) ms.
     #[task(local = [backlight])]
     fn button_pressed(cx: button_pressed::Context) {
-        if cx.local.backlight.get_brightness() < 7 {
-            cx.local.backlight.brighter();
+        //Destructure the local resources
+        let button_pressed::LocalResources { backlight } = cx.local;
+
+        if backlight.get_brightness() < 7 {
+            backlight.brighter();
         } else {
-            cx.local.backlight.off();
+            backlight.off();
         }
     }
 
     /// Fetch the battery status from the hardware. Update the text if
     /// something changed.
     #[task(shared = [battery])]
-    fn update_battery_status(mut cx: update_battery_status::Context) {
+    fn update_battery_status(cx: update_battery_status::Context) {
+        //Destructure the shared resources
+        let update_battery_status::SharedResources { mut battery } = cx.shared;
+
         rprintln!("Update battery status");
 
-        let changed = cx.shared.battery.lock(|battery| battery.update());
+        let changed = battery.lock(|battery| battery.update());
         if changed {
             rprintln!("Battery status changed");
             show_battery_status::spawn().unwrap();
@@ -510,11 +553,17 @@ mod app {
 
     /// Show the battery status on the LCD.
     #[task(shared = [battery, lcd])]
-    fn show_battery_status(mut cx: show_battery_status::Context) {
+    fn show_battery_status(cx: show_battery_status::Context) {
+        //Destructure the shared resources
+        let show_battery_status::SharedResources {
+            mut battery,
+            mut lcd,
+        } = cx.shared;
+
         let mut voltage = 0;
         let mut charging = false;
 
-        cx.shared.battery.lock(|battery| {
+        battery.lock(|battery| {
             voltage = battery.voltage();
             charging = battery.is_charging();
         });
@@ -550,7 +599,7 @@ mod app {
             text_style,
         );
 
-        cx.shared.lcd.lock(|lcd| {
+        lcd.lock(|lcd| {
             text.draw(lcd).unwrap();
         });
     }
