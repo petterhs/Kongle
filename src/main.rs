@@ -50,6 +50,20 @@ use embedded_graphics::{
 };
 use st7789::{self, Orientation};
 
+use lvgl::{
+    self, Align, Color, Part, State, Widget, UI,
+    style::Style,
+    widgets::{
+        Btn, 
+        Label
+    },
+    input_device::{
+        InputData,
+        Pointer
+    }
+};
+
+use cstr_core::CStr;
 use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
 use numtoa::NumToA;
 
@@ -77,18 +91,31 @@ impl Config for AppConfig {
 #[app(device = crate::hal::pac, peripherals = true, dispatchers = [SWI0_EGU0,SWI1_EGU1,SWI2_EGU2,SWI3_EGU3,SWI4_EGU4,SWI5_EGU5])]
 mod app {
 
+    use st7789::ST7789;
+
     use super::*;
 
     #[shared]
     struct Shared {
-        lcd: st7789::ST7789<
-            display_interface_spi::SPIInterfaceNoCS<
+        // lcd: st7789::ST7789<
+        //     display_interface_spi::SPIInterfaceNoCS<
+        //         hal::spim::Spim<hal::pac::SPIM1>,
+        //         p0::P0_18<Output<PushPull>>,
+        //     >,
+        //     p0::P0_26<Output<PushPull>>,
+        //     p0::P0_22<Output<PushPull>>,
+        // >,
+        ui: UI<ST7789<
+            SPIInterfaceNoCS<
                 hal::spim::Spim<hal::pac::SPIM1>,
                 p0::P0_18<Output<PushPull>>,
             >,
             p0::P0_26<Output<PushPull>>,
-            p0::P0_22<Output<PushPull>>,
+            p0::P0_22<Output<PushPull>>>,
+            Rgb565,
         >,
+
+
 
         // Battery
         battery: battery::BatteryStatus,
@@ -269,28 +296,61 @@ mod app {
         lcd.init(&mut lcd_delay).unwrap();
         lcd.set_orientation(Orientation::Portrait).unwrap();
 
-        // Draw something onto the LCD
-        let backdrop_style = PrimitiveStyleBuilder::new()
-            .fill_color(BACKGROUND_COLOR)
-            .build();
-        Rectangle::new(Point::new(0, 0), Size::new(LCD_W as u32, LCD_H as u32))
-            .into_styled(backdrop_style)
-            .draw(&mut lcd)
+
+        // Initialize LVGL
+        let mut ui = UI::init().unwrap();
+        ui.disp_drv_register(lcd).unwrap();
+
+        // Define the initial state of the input
+        let mut latest_touch_point = Point::new(0, 0);
+        let mut latest_touch_status = InputData::Touch(latest_touch_point.clone())
+            .released()
+            .once();
+
+        // Register a new input device that's capable of reading the current state of the input
+        let mut touch_device = Pointer::new(|| latest_touch_status);
+        ui.indev_drv_register(&mut touch_device).unwrap();
+
+        // Create screen and widgets
+        let mut screen = ui.scr_act().unwrap();
+
+        // Draw a black background to the screen
+        let mut screen_style = Style::default();
+        screen_style.set_bg_color(State::DEFAULT, Color::from_rgb((0, 0, 0)));
+        screen.add_style(Part::Main, screen_style).unwrap();
+
+        // Create the button
+        let text_click_me = CStr::from_bytes_with_nul("Click me!\0".as_bytes()).unwrap();
+        let mut touch_button = Btn::new(&mut screen).unwrap();
+        touch_button
+            .set_align(&mut screen, Align::InLeftMid, 30, 0)
             .unwrap();
+        touch_button.set_size(180, 80).unwrap();
+        let mut btn_lbl = Label::new(&mut touch_button).unwrap();
+        btn_lbl.set_text(text_click_me).unwrap();
+
+        // Draw something onto the LCD
+        // let backdrop_style = PrimitiveStyleBuilder::new()
+        //     .fill_color(BACKGROUND_COLOR)
+        //     .build();
+        // Rectangle::new(Point::new(0, 0), Size::new(LCD_W as u32, LCD_H as u32))
+        //     .into_styled(backdrop_style)
+        //     .draw(&mut lcd)
+        //     .unwrap();
 
         // Choose text style
         // let text_style = TextStyleBuilder::new()
         //     .font(&FONT_10X20)
         //     .text_color(Rgb565::WHITE);
-        let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
-            .text_color(Rgb565::WHITE)
-            .build();
+        // let text_style = MonoTextStyleBuilder::new()
+        //     .font(&FONT_10X20)
+        //     .text_color(Rgb565::WHITE)
+        //     .build();
 
         // Draw text
-        Text::new("Kongle PineTime", Point::new(10, 20), text_style)
-            .draw(&mut lcd)
-            .unwrap();
+        // Text::new("Kongle PineTime", Point::new(10, 20), text_style)
+        //     .draw(&mut lcd)
+        //     .unwrap();
 
         // Load ferris image data
         let ferris: ImageRawLE<Rgb565> =
@@ -305,7 +365,8 @@ mod app {
 
         (
             Shared {
-                lcd,
+                // lcd,
+                ui,
                 battery,
                 // text_style,
                 radio,
@@ -398,101 +459,105 @@ mod app {
         })
     }
 
-    #[task(shared = [lcd],
+    #[task(shared = [ui],
         local = [ferris, ferris_x_offset, ferris_y_offset, ferris_step_size])]
     fn write_ferris(cx: write_ferris::Context) {
         //Destructure the shared resources
-        let write_ferris::SharedResources { mut lcd } = cx.shared;
+        let write_ferris::SharedResources { mut ui } = cx.shared;
 
-        //Destructure the local resources
-        let write_ferris::LocalResources {
-            ferris,
-            ferris_x_offset,
-            ferris_y_offset,
-            ferris_step_size,
-        } = cx.local;
-
-        // Draw ferris
-        let image = Image::new(ferris, Point::new(*ferris_x_offset, *ferris_y_offset));
-
-        lcd.lock(|lcd| {
-            image.draw(lcd).unwrap();
+        ui.lock(|ui| {
+            ui.task_handler();
         });
 
-        // Clean up behind ferris
-        let backdrop_style = PrimitiveStyleBuilder::new()
-            .fill_color(BACKGROUND_COLOR)
-            .build();
-        let (p1, p2) = if *ferris_step_size > 0 {
-            // Clean up to the left
-            (
-                Point::new(
-                    *ferris_x_offset - (*ferris_step_size as i32),
-                    *ferris_y_offset,
-                ),
-                Size::new(*ferris_step_size as u32, FERRIS_H as u32),
-            )
-        } else {
-            // Clean up to the right
-            (
-                Point::new(*ferris_x_offset + FERRIS_W as i32, *ferris_y_offset),
-                Size::new(
-                    FERRIS_W as u32 - (*ferris_step_size as u32),
-                    FERRIS_H as u32,
-                ),
-            )
-        };
+        // //Destructure the local resources
+        // let write_ferris::LocalResources {
+        //     ferris,
+        //     ferris_x_offset,
+        //     ferris_y_offset,
+        //     ferris_step_size,
+        // } = cx.local;
 
-        let rectangle = Rectangle::new(p1, p2).into_styled(backdrop_style);
+        // // Draw ferris
+        // let image = Image::new(ferris, Point::new(*ferris_x_offset, *ferris_y_offset));
 
-        lcd.lock(|lcd| {
-            rectangle.draw(lcd).unwrap();
-        });
+        // lcd.lock(|lcd| {
+        //     image.draw(lcd).unwrap();
+        // });
 
-        // Reset step size
-        if *ferris_x_offset as u16 > LCD_W - FERRIS_W - MARGIN {
-            *ferris_step_size = -*ferris_step_size;
-        } else if (*ferris_x_offset as u16) < MARGIN {
-            *ferris_step_size = -*ferris_step_size;
-        }
-        *ferris_x_offset += *ferris_step_size;
+        // // Clean up behind ferris
+        // let backdrop_style = PrimitiveStyleBuilder::new()
+        //     .fill_color(BACKGROUND_COLOR)
+        //     .build();
+        // let (p1, p2) = if *ferris_step_size > 0 {
+        //     // Clean up to the left
+        //     (
+        //         Point::new(
+        //             *ferris_x_offset - (*ferris_step_size as i32),
+        //             *ferris_y_offset,
+        //         ),
+        //         Size::new(*ferris_step_size as u32, FERRIS_H as u32),
+        //     )
+        // } else {
+        //     // Clean up to the right
+        //     (
+        //         Point::new(*ferris_x_offset + FERRIS_W as i32, *ferris_y_offset),
+        //         Size::new(
+        //             FERRIS_W as u32 - (*ferris_step_size as u32),
+        //             FERRIS_H as u32,
+        //         ),
+        //     )
+        // };
+
+        // let rectangle = Rectangle::new(p1, p2).into_styled(backdrop_style);
+
+        // lcd.lock(|lcd| {
+        //     rectangle.draw(lcd).unwrap();
+        // });
+
+        // // Reset step size
+        // if *ferris_x_offset as u16 > LCD_W - FERRIS_W - MARGIN {
+        //     *ferris_step_size = -*ferris_step_size;
+        // } else if (*ferris_x_offset as u16) < MARGIN {
+        //     *ferris_step_size = -*ferris_step_size;
+        // }
+        // *ferris_x_offset += *ferris_step_size;
 
         // Re-schedule the timer interrupt
         write_ferris::spawn_after(40.millis()).unwrap();
     }
 
-    #[task(shared = [lcd], local = [counter])]
+    #[task(shared = [ui], local = [counter])]
     fn write_counter(cx: write_counter::Context) {
         //Destructure the shared resources
-        let write_counter::SharedResources { mut lcd } = cx.shared;
+        // let write_counter::SharedResources { mut lcd } = cx.shared;
 
-        //Destructure the local resources
-        let write_counter::LocalResources { counter } = cx.local;
+        // //Destructure the local resources
+        // let write_counter::LocalResources { counter } = cx.local;
 
-        rprintln!("Counter is {}", counter);
+        // rprintln!("Counter is {}", counter);
 
-        // Write counter to the display
-        let mut buf = [0u8; 20];
-        let text = counter.numtoa_str(10, &mut buf);
+        // // Write counter to the display
+        // let mut buf = [0u8; 20];
+        // let text = counter.numtoa_str(10, &mut buf);
 
-        let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
-            .text_color(Rgb565::WHITE)
-            .background_color(BACKGROUND_COLOR)
-            .build();
+        // let text_style = MonoTextStyleBuilder::new()
+        //     .font(&FONT_10X20)
+        //     .text_color(Rgb565::WHITE)
+        //     .background_color(BACKGROUND_COLOR)
+        //     .build();
 
-        let text = Text::new(
-            text,
-            Point::new(10, LCD_H as i32 - 10 - MARGIN as i32),
-            text_style,
-        );
+        // let text = Text::new(
+        //     text,
+        //     Point::new(10, LCD_H as i32 - 10 - MARGIN as i32),
+        //     text_style,
+        // );
 
-        lcd.lock(|lcd| {
-            text.draw(lcd).unwrap();
-        });
+        // lcd.lock(|lcd| {
+        //     text.draw(lcd).unwrap();
+        // });
 
-        // Increment counter
-        *counter += 1;
+        // // Increment counter
+        // *counter += 1;
 
         // Re-schedule the timer interrupt
         write_counter::spawn_after(1000.millis()).unwrap();
@@ -552,55 +617,55 @@ mod app {
     }
 
     /// Show the battery status on the LCD.
-    #[task(shared = [battery, lcd])]
+    #[task(shared = [battery, ui])]
     fn show_battery_status(cx: show_battery_status::Context) {
         //Destructure the shared resources
-        let show_battery_status::SharedResources {
-            mut battery,
-            mut lcd,
-        } = cx.shared;
+        // let show_battery_status::SharedResources {
+        //     mut battery,
+        //     mut lcd,
+        // } = cx.shared;
 
-        let mut voltage = 0;
-        let mut charging = false;
+        // let mut voltage = 0;
+        // let mut charging = false;
 
-        battery.lock(|battery| {
-            voltage = battery.voltage();
-            charging = battery.is_charging();
-        });
+        // battery.lock(|battery| {
+        //     voltage = battery.voltage();
+        //     charging = battery.is_charging();
+        // });
 
-        rprintln!(
-            "Battery status: {} ({})",
-            voltage,
-            if charging { "charging" } else { "discharging" },
-        );
+        // rprintln!(
+        //     "Battery status: {} ({})",
+        //     voltage,
+        //     if charging { "charging" } else { "discharging" },
+        // );
 
-        // Show battery status in top right corner
-        let mut buf = [0u8; 6];
-        (voltage / 10).numtoa(10, &mut buf[0..1]);
-        buf[1] = b'.';
-        (voltage % 10).numtoa(10, &mut buf[2..3]);
-        buf[3] = b'V';
-        buf[4] = b'/';
-        buf[5] = if charging { b'C' } else { b'D' };
-        let status = core::str::from_utf8(&buf).unwrap();
+        // // Show battery status in top right corner
+        // let mut buf = [0u8; 6];
+        // (voltage / 10).numtoa(10, &mut buf[0..1]);
+        // buf[1] = b'.';
+        // (voltage % 10).numtoa(10, &mut buf[2..3]);
+        // buf[3] = b'V';
+        // buf[4] = b'/';
+        // buf[5] = if charging { b'C' } else { b'D' };
+        // let status = core::str::from_utf8(&buf).unwrap();
 
-        let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
-            .text_color(Rgb565::WHITE)
-            .background_color(BACKGROUND_COLOR)
-            .build();
+        // let text_style = MonoTextStyleBuilder::new()
+        //     .font(&FONT_10X20)
+        //     .text_color(Rgb565::WHITE)
+        //     .background_color(BACKGROUND_COLOR)
+        //     .build();
 
-        let text = Text::new(
-            status,
-            Point::new(
-                LCD_W as i32 - 60 as i32 - MARGIN as i32,
-                LCD_H as i32 - 10 - MARGIN as i32,
-            ),
-            text_style,
-        );
+        // let text = Text::new(
+        //     status,
+        //     Point::new(
+        //         LCD_W as i32 - 60 as i32 - MARGIN as i32,
+        //         LCD_H as i32 - 10 - MARGIN as i32,
+        //     ),
+        //     text_style,
+        // );
 
-        lcd.lock(|lcd| {
-            text.draw(lcd).unwrap();
-        });
+        // lcd.lock(|lcd| {
+        //     text.draw(lcd).unwrap();
+        // });
     }
 }
