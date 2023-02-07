@@ -21,6 +21,7 @@ rubble = { git = "https://github.com/petterhs/rubble"}
 rubble-nrf5x = { git = "https://github.com/petterhs/rubble", features = ["52832"], default-features = false }
 st7789 = { version = "0.7.0", features = ["graphics", "batch"], default-features = false }
 lvgl = { git = "https://github.com/petterhs/lvgl-rs", features = ["lvgl_alloc"] }
+cst816s = {git = "https://github.com/tstellanova/cst816s.git"}
 cstr_core = "0.2.6"
 fugit = "0.3.3"
 debouncr = "0.2.2"
