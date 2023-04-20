@@ -62,7 +62,6 @@ use lvgl::{
     input_device::{
         InputData,
         Pointer,
-        BufferStatus
     },
 };
 
@@ -78,8 +77,8 @@ mod monotonic_nrf52;
 
 const LCD_W: u16 = 240;
 const LCD_H: u16 = 240;
-const MARGIN: u16 = 10;
-const BACKGROUND_COLOR: Rgb565 = Rgb565::new(0, 0b000111, 0);
+// const MARGIN: u16 = 10;
+// const BACKGROUND_COLOR: Rgb565 = Rgb565::new(0, 0b000111, 0);
 
 pub struct AppConfig {}
 
@@ -363,6 +362,18 @@ mod app {
         )
     }
 
+
+    #[idle()]
+    fn idle(cx: idle::Context) -> ! {
+
+        loop {
+            // Now Wait For Interrupt is used instead of a busy-wait loop
+            // to allow MCU to sleep between interrupts
+            // https://developer.arm.com/documentation/ddi0406/c/Application-Level-Architecture/Instruction-Details/Alphabetical-list-of-instructions/WFI
+            rtic::export::wfi()
+        }
+    }
+
     /// Hook up the RADIO interrupt to the Rubble BLE stack.
     #[task(binds = RADIO, shared = [radio, ble_ll], priority = 3)]
     fn radio(cx: radio::Context) {
@@ -434,7 +445,7 @@ mod app {
     }
     
     #[task(shared = [],
-        local = [ui, touchpad, lcd_delay])]
+        local = [ui, touchpad, lcd_delay], priority = 3)]
     fn display(cx: display::Context) {
         //Destructure the shared resources
         // let display::SharedResources {} = cx.shared;
