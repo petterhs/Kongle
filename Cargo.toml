@@ -6,6 +6,7 @@ edition = "2021"
 license = "MIT"
 readme = "README.md"
 repository = ""
+resolver = "2"
 
 [dependencies]
 cortex-m-rtic = "1.1.3"
@@ -20,8 +21,12 @@ rtt-target = { version = "0.3.1", features = ["cortex-m"] }
 rubble = { git = "https://github.com/petterhs/rubble"}
 rubble-nrf5x = { git = "https://github.com/petterhs/rubble", features = ["52832"], default-features = false }
 st7789 = { version = "0.7.0", features = ["graphics", "batch"], default-features = false }
+lvgl = { git = "https://github.com/petterhs/lvgl-rs", features = ["lvgl_alloc"] }
+cst816s = {git = "https://github.com/tstellanova/cst816s.git"}
+cstr_core = "0.2.6"
 fugit = "0.3.3"
 debouncr = "0.2.2"
+cortex-m = "0.7.7"
 
 [profile.dev]
 codegen-units = 1
