@@ -1,9 +1,9 @@
+use core::option::Option;
 use embedded_hal::adc::OneShot;
 use embedded_hal::digital::v2::InputPin;
 use nrf52832_hal::gpio::{p0, Floating, Input};
-use nrf52832_hal::saadc::{Saadc, SaadcConfig};
 use nrf52832_hal::pac::SAADC;
-use core::option::Option;
+use nrf52832_hal::saadc::{Saadc, SaadcConfig};
 
 pub struct BatteryStatus {
     /// Pin P0.12: High = battery, Low = charging.

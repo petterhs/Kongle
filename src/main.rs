@@ -12,16 +12,14 @@ use crate::monotonic_nrf52::MonoTimer;
 
 use display_interface_spi::SPIInterfaceNoCS;
 use embedded_graphics::{
-    prelude::*,
+    geometry::Point,
+    geometry::Size,
     mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
-    text::{Text},
-    pixelcolor::{
-        Rgb565,
-    },
+    pixelcolor::Rgb565,
+    prelude::*,
     primitives::rectangle::Rectangle,
     primitives::PrimitiveStyleBuilder,
-    geometry::Point,
-    geometry::Size
+    text::Text,
 };
 use nrf52832_hal as hal;
 use nrf52832_hal::gpio::{p0, Floating, Input, Level, Output, Pin, PushPull};
@@ -32,6 +30,7 @@ use rtt_target::{rprintln, rtt_init_print};
 
 use rubble::{
     config::Config,
+    gatt::BatteryServiceAttrs,
     l2cap::{BleChannelMap, L2CAPState},
     link::{
         ad_structure::AdStructure,
@@ -40,7 +39,6 @@ use rubble::{
     },
     security::NoSecurity,
     time::{Duration as RubbleDuration, Timer},
-    gatt::BatteryServiceAttrs,
 };
 use rubble_nrf5x::{
     radio::{BleRadio, PacketBuffer},
@@ -48,10 +46,7 @@ use rubble_nrf5x::{
     utils::get_device_address,
 };
 
-use chrono::{
-    NaiveDateTime,
-    Timelike
-};
+use chrono::{NaiveDateTime, Timelike};
 use st7789::{self, Orientation};
 
 use core::fmt::Write;
@@ -62,8 +57,8 @@ mod battery;
 mod delay;
 mod monotonic_nrf52;
 
-use monotonic_nrf52::ExtU32;
 use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
+use monotonic_nrf52::ExtU32;
 
 const LCD_W: u16 = 240;
 const LCD_H: u16 = 240;
@@ -89,10 +84,13 @@ mod app {
     #[shared]
     struct Shared {
         lcd: st7789::ST7789<
-            display_interface_spi::SPIInterfaceNoCS<hal::spim::Spim<hal::pac::SPIM1>, p0::P0_18<Output<PushPull>>>,
+            display_interface_spi::SPIInterfaceNoCS<
+                hal::spim::Spim<hal::pac::SPIM1>,
+                p0::P0_18<Output<PushPull>>,
+            >,
             p0::P0_26<Output<PushPull>>,
             p0::P0_22<Output<PushPull>>,
-            >,
+        >,
 
         // Battery
         battery: battery::BatteryStatus,
@@ -110,7 +108,7 @@ mod app {
     #[local]
     struct Local {
         backlight: backlight::Backlight,
-    
+
         // ts resources
         ts: i64,
 
@@ -122,9 +120,8 @@ mod app {
     #[monotonic(binds = TIMER1, default = true)]
     type Tonic = MonoTimer<hal::pac::TIMER1>;
 
-
     // let buffer: &'static mut [u8; 1024] = cx.local.buffer;
-    #[init(local = [ble_tx_buf: PacketBuffer = [0; MIN_PDU_BUF], 
+    #[init(local = [ble_tx_buf: PacketBuffer = [0; MIN_PDU_BUF],
         ble_rx_buf: PacketBuffer = [0; MIN_PDU_BUF],
         tx_queue: SimpleQueue = SimpleQueue::new(),
         rx_queue: SimpleQueue = SimpleQueue::new()
@@ -190,12 +187,7 @@ mod app {
         rprintln!("Bluetooth device address: {:?}", device_address);
 
         // Initialize radio
-        let mut radio = BleRadio::new(
-            RADIO,
-            &FICR,
-            cx.local.ble_tx_buf,
-            cx.local.ble_rx_buf,
-        );
+        let mut radio = BleRadio::new(RADIO, &FICR, cx.local.ble_tx_buf, cx.local.ble_rx_buf);
 
         // Create bluetooth TX/RX queues
         let (tx, tx_cons) = cx.local.tx_queue.split();
@@ -260,7 +252,6 @@ mod app {
         // display interface abstraction from SPI and DC
         let di = SPIInterfaceNoCS::new(spi, lcd_dc);
 
-
         // Initialize LCD
         let mut lcd = st7789::ST7789::new(di, Some(lcd_rst), None, LCD_W, LCD_H);
         lcd.init(&mut lcd_delay).unwrap();
@@ -284,7 +275,6 @@ mod app {
             .text_color(Rgb565::WHITE)
             .build();
 
-
         // Draw text
         Text::new("Kongle PineTime", Point::new(10, 20), text_style)
             .draw(&mut lcd)
@@ -296,34 +286,31 @@ mod app {
         show_battery_status::spawn().unwrap();
         update_battery_status::spawn().unwrap();
 
-
-        (Shared {
-            lcd,
-            battery,
-            // text_style,
-            radio,
-            ble_ll,
-            ble_r,
-        }, Local {
-            backlight,
-            ts : 0,
-            button,
-            button_debouncer: debounce_6(false),
-        }, init::Monotonics(mono))
+        (
+            Shared {
+                lcd,
+                battery,
+                // text_style,
+                radio,
+                ble_ll,
+                ble_r,
+            },
+            Local {
+                backlight,
+                ts: 0,
+                button,
+                button_debouncer: debounce_6(false),
+            },
+            init::Monotonics(mono),
+        )
     }
 
     /// Hook up the RADIO interrupt to the Rubble BLE stack.
     #[task(binds = RADIO, shared = [radio, ble_ll], priority = 3)]
     fn radio(mut cx: radio::Context) {
-
         cx.shared.ble_ll.lock(|ble_ll| {
-
             cx.shared.radio.lock(|radio| {
-
-                    
-                if let Some(cmd) = radio
-                    .recv_interrupt(ble_ll.timer().now(), ble_ll)
-                {
+                if let Some(cmd) = radio.recv_interrupt(ble_ll.timer().now(), ble_ll) {
                     radio.configure_receiver(cmd.radio);
                     ble_ll.timer().configure_interrupt(cmd.next_update);
 
@@ -340,23 +327,19 @@ mod app {
     /// Hook up the TIMER2 interrupt to the Rubble BLE stack.
     #[task(binds = TIMER2, shared = [radio, ble_ll], priority = 3)]
     fn timer2(mut cx: timer2::Context) {
-
         cx.shared.ble_ll.lock(|ble_ll| {
-
             cx.shared.radio.lock(|radio| {
                 let timer = ble_ll.timer();
                 if !timer.is_interrupt_pending() {
                     return;
                 }
                 timer.clear_interrupt();
-        
+
                 let cmd = ble_ll.update_timer(&mut *radio);
                 radio.configure_receiver(cmd.radio);
-        
-                
-                ble_ll.timer()
-                    .configure_interrupt(cmd.next_update);
-        
+
+                ble_ll.timer().configure_interrupt(cmd.next_update);
+
                 if cmd.queued_work {
                     // If there's any lower-priority work to be done, ensure that happens.
                     // If we fail to spawn the task, it's already scheduled.
@@ -364,18 +347,17 @@ mod app {
                 }
             });
         });
-
     }
 
     /// Lower-priority task spawned from RADIO and TIMER2 interrupts.
     #[task(shared = [ble_r], priority = 2)]
     fn ble_worker(mut cx: ble_worker::Context) {
         // Fully drain the packet queue
-        cx.shared.ble_r.lock(|ble_r| 
+        cx.shared.ble_r.lock(|ble_r| {
             while ble_r.has_work() {
                 ble_r.process_one().unwrap();
             }
-        )
+        })
     }
 
     #[task(shared = [lcd], local = [ts])]
@@ -383,9 +365,9 @@ mod app {
         rprintln!("ts is {}", cx.local.ts);
 
         // Write time to the display
-        let dt = NaiveDateTime::from_timestamp_opt(*cx.local.ts,0);
+        let dt = NaiveDateTime::from_timestamp_opt(*cx.local.ts, 0);
         let time = dt.unwrap().time();
-        let mut text : heapless::String<6> = String::new();
+        let mut text: heapless::String<6> = String::new();
         write!(&mut text, "{:02}:{:02}", time.hour(), time.minute()).unwrap();
 
         let text_style = MonoTextStyleBuilder::new()
@@ -394,7 +376,11 @@ mod app {
             .background_color(BACKGROUND_COLOR)
             .build();
 
-        let text = Text::new(&text, Point::new(10, LCD_H as i32 - 10 - MARGIN as i32), text_style);
+        let text = Text::new(
+            &text,
+            Point::new(10, LCD_H as i32 - 10 - MARGIN as i32),
+            text_style,
+        );
 
         cx.shared.lcd.lock(|lcd| {
             text.draw(lcd).unwrap();
@@ -452,12 +438,11 @@ mod app {
     #[task(shared = [battery, lcd])]
     fn show_battery_status(mut cx: show_battery_status::Context) {
         let mut voltage = 0;
-        let mut charging= false; 
-        
+        let mut charging = false;
+
         cx.shared.battery.lock(|battery| {
             voltage = battery.voltage();
             charging = battery.is_charging();
-
         });
 
         rprintln!(
@@ -475,7 +460,6 @@ mod app {
         buf[4] = b'/';
         buf[5] = if charging { b'C' } else { b'D' };
         let status = core::str::from_utf8(&buf).unwrap();
-        
 
         let text_style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
@@ -484,7 +468,8 @@ mod app {
             .build();
 
         let text = Text::new(
-            status, Point::new(
+            status,
+            Point::new(
                 LCD_W as i32 - 60_i32 - MARGIN as i32,
                 LCD_H as i32 - 10 - MARGIN as i32,
             ),
@@ -495,5 +480,4 @@ mod app {
             text.draw(lcd).unwrap();
         });
     }
-
 }
