@@ -7,6 +7,7 @@ set backtrace limit 32
 #set arm force-mode thumb
 #monitor arm semihosting enable
 
+set auto-load safe-path /
 # Load binary
 load
 break main

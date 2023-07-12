@@ -15,7 +15,6 @@ use embedded_graphics::{
     prelude::*,
     mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
     text::{Text},
-    image::{Image, ImageRawLE},
     pixelcolor::{
         Rgb565,
     },
@@ -49,7 +48,14 @@ use rubble_nrf5x::{
     utils::get_device_address,
 };
 
+use chrono::{
+    NaiveDateTime,
+    Timelike
+};
 use st7789::{self, Orientation};
+
+use core::fmt::Write;
+use heapless::String;
 
 mod backlight;
 mod battery;
@@ -61,9 +67,6 @@ use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
 
 const LCD_W: u16 = 240;
 const LCD_H: u16 = 240;
-
-const FERRIS_W: u16 = 86;
-const FERRIS_H: u16 = 64;
 
 const MARGIN: u16 = 10;
 
@@ -108,14 +111,8 @@ mod app {
     struct Local {
         backlight: backlight::Backlight,
     
-        // Ferris resources
-        ferris: ImageRawLE<'static,Rgb565>,
-        ferris_x_offset: i32,
-        ferris_y_offset: i32,
-        ferris_step_size: i32,
-
-        // Counter resources
-        counter: usize,
+        // ts resources
+        ts: i64,
 
         // Button
         button: Pin<Input<Floating>>,
@@ -293,12 +290,8 @@ mod app {
             .draw(&mut lcd)
             .unwrap();
 
-        // Load ferris image data
-        let ferris: ImageRawLE<Rgb565> = ImageRawLE::new(include_bytes!("../ferris.raw"), FERRIS_W as u32);
-
         // Schedule tasks immediately
-        write_counter::spawn().unwrap();
-        write_ferris::spawn().unwrap();
+        write_ts::spawn().unwrap();
         poll_button::spawn().unwrap();
         show_battery_status::spawn().unwrap();
         update_battery_status::spawn().unwrap();
@@ -313,13 +306,7 @@ mod app {
             ble_r,
         }, Local {
             backlight,
-            ferris,
-            ferris_x_offset: 10,
-            ferris_y_offset: 80,
-            ferris_step_size: 2,
-
-            counter : 0,
-
+            ts : 0,
             button,
             button_debouncer: debounce_6(false),
         }, init::Monotonics(mono))
@@ -391,77 +378,15 @@ mod app {
         )
     }
 
-    #[task(shared = [lcd],
-        local = [ferris, ferris_x_offset, ferris_y_offset, ferris_step_size])]
-    fn write_ferris(mut cx: write_ferris::Context) {
-        // Draw ferris
-        let image = Image::new(
-            cx.local.ferris,
-            Point::new(*cx.local.ferris_x_offset, *cx.local.ferris_y_offset),
-        );
+    #[task(shared = [lcd], local = [ts])]
+    fn write_ts(mut cx: write_ts::Context) {
+        rprintln!("ts is {}", cx.local.ts);
 
-        cx.shared.lcd.lock(|lcd| {
-            image.draw(lcd).unwrap();
-        });
-
-        // Clean up behind ferris
-        let backdrop_style = PrimitiveStyleBuilder::new()
-            .fill_color(BACKGROUND_COLOR)
-            .build();
-        let (p1, p2) = if *cx.local.ferris_step_size > 0 {
-            // Clean up to the left
-            (
-                Point::new(
-                    *cx.local.ferris_x_offset - (*cx.local.ferris_step_size as i32),
-                    *cx.local.ferris_y_offset,
-                ),
-                Size::new(
-                    *cx.local.ferris_step_size as u32,
-                    FERRIS_H as u32,
-                ),
-            )
-        } else {
-            // Clean up to the right
-            (
-                Point::new(
-                    *cx.local.ferris_x_offset + FERRIS_W as i32,
-                    *cx.local.ferris_y_offset,
-                ),
-                Size::new(
-                    FERRIS_W as u32
-                        - (*cx.local.ferris_step_size as u32),
-                    FERRIS_H as u32,
-                ),
-            )
-        };
-        
-        let rectangle = Rectangle::new(p1, p2)
-            .into_styled(backdrop_style);
-
-
-        cx.shared.lcd.lock(|lcd| {
-            rectangle.draw(lcd).unwrap();
-        });
-
-        // Reset step size
-        if *cx.local.ferris_x_offset as u16 > LCD_W - FERRIS_W - MARGIN {
-            *cx.local.ferris_step_size = -*cx.local.ferris_step_size;
-        } else if (*cx.local.ferris_x_offset as u16) < MARGIN {
-            *cx.local.ferris_step_size = -*cx.local.ferris_step_size;
-        }
-        *cx.local.ferris_x_offset += *cx.local.ferris_step_size;
-
-        // Re-schedule the timer interrupt
-        write_ferris::spawn_after(40.millis()).unwrap();
-    }
-
-    #[task(shared = [lcd], local = [counter])]
-    fn write_counter(mut cx: write_counter::Context) {
-        rprintln!("Counter is {}", cx.local.counter);
-
-        // Write counter to the display
-        let mut buf = [0u8; 20];
-        let text = cx.local.counter.numtoa_str(10, &mut buf);
+        // Write time to the display
+        let dt = NaiveDateTime::from_timestamp_opt(*cx.local.ts,0);
+        let time = dt.unwrap().time();
+        let mut text : heapless::String<6> = String::new();
+        write!(&mut text, "{:02}:{:02}", time.hour(), time.minute()).unwrap();
 
         let text_style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
@@ -469,17 +394,17 @@ mod app {
             .background_color(BACKGROUND_COLOR)
             .build();
 
-        let text = Text::new(text, Point::new(10, LCD_H as i32 - 10 - MARGIN as i32), text_style);
+        let text = Text::new(&text, Point::new(10, LCD_H as i32 - 10 - MARGIN as i32), text_style);
 
         cx.shared.lcd.lock(|lcd| {
             text.draw(lcd).unwrap();
         });
 
-        // Increment counter
-        *cx.local.counter += 1;
+        // Increment ts
+        *cx.local.ts += 1;
 
         // Re-schedule the timer interrupt
-        write_counter::spawn_after(1000.millis()).unwrap();
+        write_ts::spawn_after(1000.millis()).unwrap();
     }
 
     #[task(local = [button, button_debouncer])]
@@ -560,7 +485,7 @@ mod app {
 
         let text = Text::new(
             status, Point::new(
-                LCD_W as i32 - 60 as i32 - MARGIN as i32,
+                LCD_W as i32 - 60_i32 - MARGIN as i32,
                 LCD_H as i32 - 10 - MARGIN as i32,
             ),
             text_style,
