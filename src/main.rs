@@ -30,7 +30,6 @@ use rtt_target::{rprintln, rtt_init_print};
 
 use rubble::{
     config::Config,
-    gatt::BatteryServiceAttrs,
     l2cap::{BleChannelMap, L2CAPState},
     link::{
         ad_structure::AdStructure,
@@ -46,7 +45,7 @@ use rubble_nrf5x::{
     utils::get_device_address,
 };
 
-use chrono::{NaiveDateTime, Timelike};
+use chrono::{NaiveDateTime, Timelike, Duration};
 use st7789::{self, Orientation};
 
 use core::fmt::Write;
@@ -54,6 +53,7 @@ use heapless::String;
 
 mod backlight;
 mod battery;
+mod ble_attrs;
 mod delay;
 mod monotonic_nrf52;
 
@@ -72,7 +72,7 @@ pub struct AppConfig {}
 impl Config for AppConfig {
     type Timer = BleTimer<hal::pac::TIMER2>;
     type Transmitter = BleRadio;
-    type ChannelMapper = BleChannelMap<BatteryServiceAttrs, NoSecurity>;
+    type ChannelMapper = BleChannelMap<ble_attrs::KongleAttrs, NoSecurity>;
     type PacketQueue = &'static mut SimpleQueue;
 }
 
@@ -95,22 +95,18 @@ mod app {
         // Battery
         battery: battery::BatteryStatus,
 
-        // Styles
-        // text_style: MonoTextStyleBuilder<'static,Rgb565>,
-        // text_style: MonoTextStyleBuilder<Rgb565>,
-
         // BLE
         radio: BleRadio,
         ble_ll: LinkLayer<AppConfig>,
         ble_r: Responder<AppConfig>,
+
+        // Date and time
+        date_time: NaiveDateTime,
     }
 
     #[local]
     struct Local {
         backlight: backlight::Backlight,
-
-        // ts resources
-        ts: i64,
 
         // Button
         button: Pin<Input<Floating>>,
@@ -168,7 +164,7 @@ mod app {
             gpio.p0_14.into_push_pull_output(Level::High).degrade(),
             gpio.p0_22.into_push_pull_output(Level::High).degrade(),
             gpio.p0_23.into_push_pull_output(Level::High).degrade(),
-            1,
+            5,
         );
 
         // Battery status
@@ -176,6 +172,12 @@ mod app {
             gpio.p0_12.into_floating_input(),
             gpio.p0_31.into_floating_input(),
             SAADC,
+        );
+
+        // Initialize DateTime
+        let date_time = NaiveDateTime::new(
+            chrono::NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
         );
 
         // Enable button
@@ -198,7 +200,7 @@ mod app {
         let ble_r = Responder::<AppConfig>::new(
             tx,
             rx,
-            L2CAPState::new(BleChannelMap::with_attributes(BatteryServiceAttrs::new())),
+            L2CAPState::new(BleChannelMap::with_attributes(ble_attrs::KongleAttrs::new())),
         );
 
         // Send advertisement and set up regular interrupt
@@ -294,10 +296,11 @@ mod app {
                 radio,
                 ble_ll,
                 ble_r,
+
+                date_time,
             },
             Local {
                 backlight,
-                ts: 0,
                 button,
                 button_debouncer: debounce_6(false),
             },
@@ -360,15 +363,24 @@ mod app {
         })
     }
 
-    #[task(shared = [lcd], local = [ts])]
+    #[task(shared = [lcd, date_time])]
     fn write_ts(mut cx: write_ts::Context) {
-        rprintln!("ts is {}", cx.local.ts);
+        rprintln!(
+            "date_time is {:?}",
+            cx.shared.date_time.lock(|date_time| *date_time)
+        );
 
         // Write time to the display
-        let dt = NaiveDateTime::from_timestamp_opt(*cx.local.ts, 0);
-        let time = dt.unwrap().time();
-        let mut text: heapless::String<6> = String::new();
-        write!(&mut text, "{:02}:{:02}", time.hour(), time.minute()).unwrap();
+        let time = cx.shared.date_time.lock(|date_time| *date_time).time();
+        let mut text: heapless::String<8> = String::new();
+        write!(
+            &mut text,
+            "{:02}:{:02}:{:02}",
+            time.hour(),
+            time.minute(),
+            time.second()
+        )
+        .unwrap();
 
         let text_style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
@@ -386,8 +398,10 @@ mod app {
             text.draw(lcd).unwrap();
         });
 
-        // Increment ts
-        *cx.local.ts += 1;
+        // Increment date_time
+        cx.shared.date_time.lock(|date_time| {
+            *date_time += Duration::seconds(1);
+        });
 
         // Re-schedule the timer interrupt
         write_ts::spawn_after(1000.millis()).unwrap();
@@ -478,6 +492,15 @@ mod app {
 
         cx.shared.lcd.lock(|lcd| {
             text.draw(lcd).unwrap();
+        });
+    }
+
+    #[task(shared = [date_time])]
+    fn set_date_time(mut cx: set_date_time::Context, new_date_time: NaiveDateTime) {
+        rprintln!("Set date time");
+        rprintln!("Set date time to {:?}", new_date_time);
+        cx.shared.date_time.lock(|date_time| {
+            *date_time = new_date_time;
         });
     }
 }
