@@ -1,5 +1,5 @@
 init
 
-program ./pinetime-mcuboot-app-image-1.8.0.bin verify 0x00008000
+program ../target/thumbv7m-none-eabihf/release/kongle.bin 0x00008000
 
 reset

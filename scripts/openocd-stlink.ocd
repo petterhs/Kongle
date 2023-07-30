@@ -5,4 +5,6 @@ gdb_breakpoint_override hard
 
 source [find target/nrf52.cfg]
 
+rtt setup 0x20000000 0x0fff "SEGGER RTT"
+
 reset_config none separate

@@ -1,4 +1,4 @@
-target remote :3333
+target extended-remote :3333
 
 # General config
 set backtrace limit 32
@@ -7,7 +7,6 @@ set backtrace limit 32
 #set arm force-mode thumb
 #monitor arm semihosting enable
 
-set auto-load safe-path /
 # Load binary
 load
 break main
