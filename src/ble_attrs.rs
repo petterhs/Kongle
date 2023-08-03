@@ -26,7 +26,6 @@ const CHARACTERISTIC_UUID16: Uuid16 = Uuid16(0x2803);
 // const DATE_TIME_UUID16: Uuid16 = Uuid16(0x2A08);
 const CURRENT_TIME_UUID16: Uuid16 = Uuid16(0x2A2B);
 
-
 const CURRENT_TIME_CHAR_DECL_VALUE: [u8; 19] = [
     0x02 | 0x08, // 0x02 = read, 0x08 = write with response
     // 2 byte handle pointing to characteristic value
@@ -50,7 +49,11 @@ const CURRENT_TIME_CHAR_DECL_VALUE: [u8; 19] = [
     0x00,
     0x00,
 ];
-
+impl Default for KongleAttrs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl KongleAttrs {
     pub fn new() -> Self {
         Self {

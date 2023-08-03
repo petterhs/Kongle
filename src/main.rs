@@ -14,7 +14,10 @@ use display_interface_spi::SPIInterfaceNoCS;
 use embedded_graphics::{
     geometry::Point,
     geometry::Size,
-    mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
+    image::ImageRaw,
+    mono_font::{
+        ascii::FONT_10X20, mapping::ASCII, DecorationDimensions, MonoFont, MonoTextStyleBuilder,
+    },
     pixelcolor::Rgb565,
     prelude::*,
     primitives::rectangle::Rectangle,
@@ -45,7 +48,7 @@ use rubble_nrf5x::{
     utils::get_device_address,
 };
 
-use chrono::{NaiveDateTime, Timelike, Duration};
+use chrono::{Duration, NaiveDateTime, Timelike};
 use st7789::{self, Orientation};
 
 use core::fmt::Write;
@@ -65,7 +68,30 @@ const LCD_H: u16 = 240;
 
 const MARGIN: u16 = 10;
 
-const BACKGROUND_COLOR: Rgb565 = Rgb565::new(0, 0b000111, 0);
+const BACKGROUND_COLOR: Rgb565 = Rgb565::new(0, 0b000000, 0);
+
+/// 44x85 pixel 54 point size extra bold monospace font
+pub const JETBRAINS_FONT_54_POINT_EXTRA_BOLD: MonoFont = MonoFont {
+    image: ImageRaw::new_binary(
+        include_bytes!("../fonts/jetbrains_font_54_extra_bold.raw"),
+        704,
+    ),
+    glyph_mapping: &ASCII,
+    character_size: Size::new(44, 85),
+    character_spacing: 2,
+    baseline: 71,
+    underline: DecorationDimensions::new(71 + 2, 1),
+    strikethrough: DecorationDimensions::new(85 / 2, 1),
+};
+
+type PineTimeDisplay = st7789::ST7789<
+    display_interface_spi::SPIInterfaceNoCS<
+        hal::spim::Spim<hal::pac::SPIM1>,
+        p0::P0_18<Output<PushPull>>,
+    >,
+    p0::P0_26<Output<PushPull>>,
+    p0::P0_22<Output<PushPull>>,
+>;
 
 pub struct AppConfig {}
 
@@ -83,14 +109,7 @@ mod app {
 
     #[shared]
     struct Shared {
-        lcd: st7789::ST7789<
-            display_interface_spi::SPIInterfaceNoCS<
-                hal::spim::Spim<hal::pac::SPIM1>,
-                p0::P0_18<Output<PushPull>>,
-            >,
-            p0::P0_26<Output<PushPull>>,
-            p0::P0_22<Output<PushPull>>,
-        >,
+        lcd: PineTimeDisplay,
 
         // Battery
         battery: battery::BatteryStatus,
@@ -283,7 +302,8 @@ mod app {
             .unwrap();
 
         // Schedule tasks immediately
-        write_ts::spawn().unwrap();
+        write_clock::spawn().unwrap();
+        increment_datetime::spawn().unwrap();
         poll_button::spawn().unwrap();
         show_battery_status::spawn().unwrap();
         update_battery_status::spawn().unwrap();
@@ -362,49 +382,47 @@ mod app {
             }
         })
     }
+    #[task(shared = [date_time])]
+    fn increment_datetime(mut cx: increment_datetime::Context) {
+        increment_datetime::spawn_after(1000.millis()).unwrap();
 
-    #[task(shared = [lcd, date_time])]
-    fn write_ts(mut cx: write_ts::Context) {
+        // Increment date_time
+        cx.shared.date_time.lock(|date_time| {
+            *date_time += Duration::seconds(1);
+            if date_time.second() == 0 {
+                let _ = write_clock::spawn();
+            }
+        });
+
         rprintln!(
             "date_time is {:?}",
+            cx.shared.date_time.lock(|date_time| *date_time)
+        );
+    }
+
+    #[task(shared = [lcd, date_time])]
+    fn write_clock(mut cx: write_clock::Context) {
+        rprintln!(
+            "written time is {:?}",
             cx.shared.date_time.lock(|date_time| *date_time)
         );
 
         // Write time to the display
         let time = cx.shared.date_time.lock(|date_time| *date_time).time();
         let mut text: heapless::String<8> = String::new();
-        write!(
-            &mut text,
-            "{:02}:{:02}:{:02}",
-            time.hour(),
-            time.minute(),
-            time.second()
-        )
-        .unwrap();
+        write!(&mut text, "{:02}:{:02}", time.hour(), time.minute(),).unwrap();
 
         let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
+            .font(&JETBRAINS_FONT_54_POINT_EXTRA_BOLD)
             .text_color(Rgb565::WHITE)
             .background_color(BACKGROUND_COLOR)
             .build();
 
-        let text = Text::new(
-            &text,
-            Point::new(10, LCD_H as i32 - 10 - MARGIN as i32),
-            text_style,
-        );
+        let text = Text::new(&text, Point::new(5, LCD_H as i32 / 2 + 27), text_style);
 
         cx.shared.lcd.lock(|lcd| {
             text.draw(lcd).unwrap();
         });
-
-        // Increment date_time
-        cx.shared.date_time.lock(|date_time| {
-            *date_time += Duration::seconds(1);
-        });
-
-        // Re-schedule the timer interrupt
-        write_ts::spawn_after(1000.millis()).unwrap();
     }
 
     #[task(local = [button, button_debouncer])]
@@ -436,8 +454,6 @@ mod app {
     /// something changed.
     #[task(shared = [battery])]
     fn update_battery_status(mut cx: update_battery_status::Context) {
-        rprintln!("Update battery status");
-
         let changed = cx.shared.battery.lock(|battery| battery.update());
         if changed {
             rprintln!("Battery status changed");
@@ -497,10 +513,10 @@ mod app {
 
     #[task(shared = [date_time])]
     fn set_date_time(mut cx: set_date_time::Context, new_date_time: NaiveDateTime) {
-        rprintln!("Set date time");
         rprintln!("Set date time to {:?}", new_date_time);
         cx.shared.date_time.lock(|date_time| {
             *date_time = new_date_time;
         });
+        let _ = write_clock::spawn();
     }
 }
