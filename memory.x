@@ -1,6 +1,28 @@
 MEMORY
 {
-  /* NOTE K = KiBi = 1024 bytes */
-  FLASH : ORIGIN = 0x00000000, LENGTH = 512K
-  RAM : ORIGIN = 0x20000000, LENGTH = 64K
+ /* ---- INTERNAL FLASH ---- */
+ /* BOOTLOADER : ORIGIN = 0x00000000, LENGTH = 28K */
+ /* REBOOTLOG : ORIGIN =  0x00007000, LENGTH = 4K */
+    HEADER : ORIGIN = 0x00008000, LENGTH = 32
+    FLASH : ORIGIN =  0x00008020, LENGTH = 475064 /* 464K - 32 (HEADER) - 40 (FOOTER)*/
+    /*FOOTER: ORIGIN =  0x0007bfd8, LENGTH = 40 <-- Gives syntax error ?!*/
+ /* SCRATCH : ORIGIN =    0x0007c000, LENGTH = 4K */
+
+ /* ---- EXTERNAL FLASH ---- */
+ /* BOOTLOADERASSETS : ORIGIN = 0x00000000, LENGTH = 4K */
+ /* STANDBY_IMAGE :    ORIGIN = 0x00040000, LENGTH = 464K */
+ /* USER_FILESYSTEM :  ORIGIN = 0x000b4000, LENGTH = 3376K */
+
+ /* ---- RAM ---- */
+    RAM : ORIGIN = 0x20000000, LENGTH = 64K
+}
+
+flash_start = ORIGIN(HEADER);
+
+/* Source: https://github.com/david-boles/pinetime-rust-mcuboot/blob/main/memory.x */
+SECTIONS {
+    .mcuboot_header : {
+      FILL(0xAAAAAAAA)
+      . = . + 32;
+    } > HEADER
 }

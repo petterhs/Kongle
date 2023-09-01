@@ -2,14 +2,18 @@
 // #![deny(warnings)]
 #![no_main]
 #![no_std]
+#![feature(alloc_error_handler)]
 // #![cfg_attr(not(test))]
 // #![warn(rust_2018_idioms)]
 // Panic handler
 #[cfg(not(test))]
-use panic_rtt_target as _;
+// use panic_rtt_target as _;
+
+extern crate alloc;
 
 use crate::monotonic_nrf52::MonoTimer;
-
+use linked_list_allocator::LockedHeap;
+use core::panic::PanicInfo;
 use display_interface_spi::SPIInterfaceNoCS;
 use embedded_graphics::{
     geometry::Point,
@@ -24,9 +28,12 @@ use embedded_graphics::{
     primitives::PrimitiveStyleBuilder,
     text::Text,
 };
+use hal::{
+    gpio::{p0, Floating, Input, Level, Output, Pin, PushPull},
+    prelude::*,
+    wdt::{count, handles::HdlN, Watchdog, WatchdogHandle},
+};
 use nrf52832_hal as hal;
-use nrf52832_hal::gpio::{p0, Floating, Input, Level, Output, Pin, PushPull};
-use nrf52832_hal::prelude::*;
 use numtoa::NumToA;
 use rtic::app;
 use rtt_target::{rprintln, rtt_init_print};
@@ -51,6 +58,7 @@ use rubble_nrf5x::{
 use chrono::{Duration, NaiveDateTime, Timelike};
 use st7789::{self, Orientation};
 
+use alloc::alloc::Layout;
 use core::fmt::Write;
 use heapless::String;
 
@@ -58,8 +66,11 @@ mod backlight;
 mod battery;
 mod ble_attrs;
 mod delay;
+mod drivers;
 mod monotonic_nrf52;
 
+use crate::drivers::flash::InternalFlash;
+use crate::drivers::mcuboot::MCUBoot;
 use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
 use monotonic_nrf52::ExtU32;
 
@@ -121,6 +132,8 @@ mod app {
 
         // Date and time
         date_time: NaiveDateTime,
+        watchdog_handles: [WatchdogHandle<HdlN>; 1],
+        mcuboot: MCUBoot,
     }
 
     #[local]
@@ -153,12 +166,28 @@ mod app {
             TIMER0,
             TIMER1,
             TIMER2,
+            WDT,
+            NVMC,
             ..
         } = cx.device;
 
         // Init RTT
         rtt_init_print!();
-        rprintln!("Initializing…");
+        rprintln!("Initializing…"); 
+
+        
+        let heap_start = 0x2000_1000;
+        let heap_end = 0x2001_0000;
+        let heap_size = heap_end - heap_start;
+        unsafe {
+            // Set up heap
+            crate::app::HEAP.lock().init(heap_start, heap_size);
+        }
+
+        // Set up watchdog (enabled by MCUBoot)
+        let watchdog = Watchdog::try_recover::<count::One>(WDT).unwrap();
+        let (watchdog_handle_0,) = watchdog.handles;
+        let watchdog_handles = [watchdog_handle_0.degrade()];
 
         // Set up clocks. On reset, the high frequency clock is already used,
         // but we also need to switch to the external HF oscillator. This is
@@ -264,6 +293,11 @@ mod app {
             0,
         );
 
+        // Set up internal flash
+        let mut internal_flash = InternalFlash::new(NVMC);
+
+        let mcuboot = MCUBoot::get(&mut internal_flash);
+
         // Chip select must be held low while driving the display. It must be high
         // when using other SPI devices on the same bus (such as external flash
         // storage) so that the display controller won't respond to the wrong
@@ -302,6 +336,8 @@ mod app {
             .unwrap();
 
         // Schedule tasks immediately
+        pet_watchdog::spawn().unwrap();
+        // validate::spawn().unwrap();
         write_clock::spawn().unwrap();
         increment_datetime::spawn().unwrap();
         poll_button::spawn().unwrap();
@@ -318,6 +354,8 @@ mod app {
                 ble_r,
 
                 date_time,
+                watchdog_handles,
+                mcuboot,
             },
             Local {
                 backlight,
@@ -326,6 +364,27 @@ mod app {
             },
             init::Monotonics(mono),
         )
+    }
+
+    #[panic_handler]
+    fn panic(info: &PanicInfo) -> ! {
+        rprintln!("----- PANIC -----");
+        rprintln!("{:#?}", info);
+        loop {
+            cortex_m::asm::bkpt();
+        }
+    }
+
+    #[global_allocator]
+    static HEAP: LockedHeap = LockedHeap::empty();
+
+    #[alloc_error_handler]
+    fn on_oom(layout: Layout) -> ! {
+        rprintln!("----- OOM -----");
+        rprintln!("{:#?}", layout);
+        loop {
+            cortex_m::asm::bkpt();
+        }
     }
 
     /// Hook up the RADIO interrupt to the Rubble BLE stack.
@@ -519,4 +578,25 @@ mod app {
         });
         let _ = write_clock::spawn();
     }
+
+    #[task(shared = [watchdog_handles])]
+    fn pet_watchdog(mut cx: pet_watchdog::Context) {
+        crate::app::pet_watchdog::spawn_after(5.secs()).unwrap();
+        cx.shared.watchdog_handles.lock(|watchdog_handles| {
+            for watchdog_handle in watchdog_handles {
+                watchdog_handle.pet();
+            }
+        });
+    }
+
+    // #[task(shared = [mcuboot])]
+    // fn validate(ctx: validate::Context) {
+    //     ctx.shared.mcuboot.lock(|mcuboot| {
+    //         if !mcuboot.footer.is_valid {
+    //             crate::app::self_test::spawn().unwrap();
+    //         }
+    //     });
+    //
+    //     // crate::tasks::display_init::spawn().unwrap();
+    // }
 }
