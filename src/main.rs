@@ -1,522 +1,270 @@
-// #![deny(unsafe_code)]
-// #![deny(warnings)]
+#![cfg_attr(not(test), no_std)]
 #![no_main]
-#![no_std]
-// #![cfg_attr(not(test))]
-// #![warn(rust_2018_idioms)]
-// Panic handler
-#[cfg(not(test))]
-use panic_rtt_target as _;
 
-use crate::monotonic_nrf52::MonoTimer;
+mod ble;
+mod device;
+mod fonts;
 
-use display_interface_spi::SPIInterfaceNoCS;
+use core::fmt::Write;
+use defmt_rtt as _;
+use embassy_executor::Spawner;
+use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
+use embassy_nrf::interrupt::Priority;
+use embassy_nrf::saadc;
+use embassy_nrf::spim::{Config as SpimConfig, Spim};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch,
+};
+use embassy_time::{Delay, Duration, Ticker};
 use embedded_graphics::{
-    geometry::Point,
-    geometry::Size,
-    image::ImageRaw,
-    mono_font::{
-        ascii::FONT_10X20, mapping::ASCII, DecorationDimensions, MonoFont, MonoTextStyleBuilder,
-    },
-    pixelcolor::Rgb565,
+    mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
     prelude::*,
-    primitives::rectangle::Rectangle,
     primitives::PrimitiveStyleBuilder,
     text::Text,
 };
-use nrf52832_hal as hal;
-use nrf52832_hal::gpio::{p0, Floating, Input, Level, Output, Pin, PushPull};
-use nrf52832_hal::prelude::*;
-use numtoa::NumToA;
-use rtic::app;
-use rtt_target::{rprintln, rtt_init_print};
-
-use rubble::{
-    config::Config,
-    l2cap::{BleChannelMap, L2CAPState},
-    link::{
-        ad_structure::AdStructure,
-        queue::{PacketQueue, SimpleQueue},
-        LinkLayer, Responder, MIN_PDU_BUF,
-    },
-    security::NoSecurity,
-    time::{Duration as RubbleDuration, Timer},
-};
-use rubble_nrf5x::{
-    radio::{BleRadio, PacketBuffer},
-    timer::BleTimer,
-    utils::get_device_address,
-};
-
-use chrono::{Duration, NaiveDateTime, Timelike};
-use st7789::{self, Orientation};
-
-use core::fmt::Write;
+use embedded_hal_bus::spi::ExclusiveDevice;
 use heapless::String;
+use mipidsi::{models::ST7789, Builder};
+use panic_probe as _;
 
-mod backlight;
-mod battery;
-mod ble_attrs;
-mod delay;
-mod monotonic_nrf52;
+use device::battery::BatteryState;
+use device::display as display_cfg;
+use device::input::InputEvent;
+use fonts::JETBRAINS_FONT_54_POINT_EXTRA_BOLD;
 
-use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
-use monotonic_nrf52::ExtU32;
+embassy_nrf::bind_interrupts!(struct Irqs {
+    TWISPI0 => embassy_nrf::spim::InterruptHandler<embassy_nrf::peripherals::TWISPI0>;
+    SAADC => embassy_nrf::saadc::InterruptHandler;
+});
 
-const LCD_W: u16 = 240;
-const LCD_H: u16 = 240;
-
-const MARGIN: u16 = 10;
-
-const BACKGROUND_COLOR: Rgb565 = Rgb565::new(0, 0b000000, 0);
-
-/// 44x85 pixel 54 point size extra bold monospace font
-pub const JETBRAINS_FONT_54_POINT_EXTRA_BOLD: MonoFont = MonoFont {
-    image: ImageRaw::new_binary(
-        include_bytes!("../fonts/jetbrains_font_54_extra_bold.raw"),
-        704,
-    ),
-    glyph_mapping: &ASCII,
-    character_size: Size::new(44, 85),
-    character_spacing: 2,
-    baseline: 71,
-    underline: DecorationDimensions::new(71 + 2, 1),
-    strikethrough: DecorationDimensions::new(85 / 2, 1),
-};
-
-type PineTimeDisplay = st7789::ST7789<
-    display_interface_spi::SPIInterfaceNoCS<
-        hal::spim::Spim<hal::pac::SPIM1>,
-        p0::P0_18<Output<PushPull>>,
-    >,
-    p0::P0_26<Output<PushPull>>,
-    p0::P0_22<Output<PushPull>>,
->;
-
-pub struct AppConfig {}
-
-impl Config for AppConfig {
-    type Timer = BleTimer<hal::pac::TIMER2>;
-    type Transmitter = BleRadio;
-    type ChannelMapper = BleChannelMap<ble_attrs::KongleAttrs, NoSecurity>;
-    type PacketQueue = &'static mut SimpleQueue;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TimeState {
+    hours: u8,
+    minutes: u8,
+    seconds: u8,
 }
 
-#[app(device = crate::hal::pac, peripherals = true, dispatchers = [SWI0_EGU0,SWI1_EGU1,SWI2_EGU2,SWI3_EGU3,SWI4_EGU4,SWI5_EGU5])]
-mod app {
-
-    use super::*;
-
-    #[shared]
-    struct Shared {
-        lcd: PineTimeDisplay,
-
-        // Battery
-        battery: battery::BatteryStatus,
-
-        // BLE
-        radio: BleRadio,
-        ble_ll: LinkLayer<AppConfig>,
-        ble_r: Responder<AppConfig>,
-
-        // Date and time
-        date_time: NaiveDateTime,
+impl TimeState {
+    fn tick(&mut self) {
+        self.seconds = self.seconds.wrapping_add(1);
+        if self.seconds >= 60 {
+            self.seconds = 0;
+            self.minutes = self.minutes.wrapping_add(1);
+        }
+        if self.minutes >= 60 {
+            self.minutes = 0;
+            self.hours = self.hours.wrapping_add(1);
+        }
+        if self.hours >= 24 {
+            self.hours = 0;
+        }
     }
+}
 
-    #[local]
-    struct Local {
-        backlight: backlight::Backlight,
+static TIME_WATCH: Watch<CriticalSectionRawMutex, TimeState, 2> = Watch::new();
+static BATTERY_WATCH: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
+static BUTTON_CH: Channel<CriticalSectionRawMutex, InputEvent, 4> = Channel::new();
 
-        // Button
-        button: Pin<Input<Floating>>,
-        button_debouncer: Debouncer<u8, Repeat6>,
+#[defmt::panic_handler]
+fn panic() -> ! {
+    panic_probe::hard_fault()
+}
+
+#[embassy_executor::task]
+async fn clock_task(sender: embassy_sync::watch::Sender<'static, CriticalSectionRawMutex, TimeState, 2>) {
+    let mut state = TimeState {
+        hours: 12,
+        minutes: 0,
+        seconds: 0,
+    };
+    sender.send(state);
+    let mut ticker = Ticker::every(Duration::from_secs(1));
+    loop {
+        ticker.next().await;
+        state.tick();
+        sender.send(state);
     }
+}
 
-    #[monotonic(binds = TIMER1, default = true)]
-    type Tonic = MonoTimer<hal::pac::TIMER1>;
-
-    // let buffer: &'static mut [u8; 1024] = cx.local.buffer;
-    #[init(local = [ble_tx_buf: PacketBuffer = [0; MIN_PDU_BUF],
-        ble_rx_buf: PacketBuffer = [0; MIN_PDU_BUF],
-        tx_queue: SimpleQueue = SimpleQueue::new(),
-        rx_queue: SimpleQueue = SimpleQueue::new()
-        ])]
-    fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
-        // Destructure device peripherals
-        let hal::pac::Peripherals {
-            CLOCK,
-            FICR,
-            P0,
-            RADIO,
-            SAADC,
-            SPIM1,
-            TIMER0,
-            TIMER1,
-            TIMER2,
-            ..
-        } = cx.device;
-
-        // Init RTT
-        rtt_init_print!();
-        rprintln!("Initializing…");
-
-        // Set up clocks. On reset, the high frequency clock is already used,
-        // but we also need to switch to the external HF oscillator. This is
-        // needed for Bluetooth to work.
-        let _clocks = hal::clocks::Clocks::new(CLOCK).enable_ext_hfosc();
-
-        // Set up delay provider on TIMER0
-        let mut lcd_delay = delay::TimerDelay::new(TIMER0);
-
-        // Initialize monotonic timer on TIMER1 (for RTIC)
-        // monotonic_nrf52::Tim1::initialize(TIMER1);
-        let mono = MonoTimer::new(TIMER1);
-
-        // Initialize BLE timer on TIMER2
-        let ble_timer = BleTimer::init(TIMER2);
-
-        // Set up GPIO peripheral
-        let gpio = hal::gpio::p0::Parts::new(P0);
-
-        // Enable backlight
-        let backlight = backlight::Backlight::init(
-            gpio.p0_14.into_push_pull_output(Level::High).degrade(),
-            gpio.p0_22.into_push_pull_output(Level::High).degrade(),
-            gpio.p0_23.into_push_pull_output(Level::High).degrade(),
-            5,
-        );
-
-        // Battery status
-        let battery = battery::BatteryStatus::init(
-            gpio.p0_12.into_floating_input(),
-            gpio.p0_31.into_floating_input(),
-            SAADC,
-        );
-
-        // Initialize DateTime
-        let date_time = NaiveDateTime::new(
-            chrono::NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
-            chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-        );
-
-        // Enable button
-        gpio.p0_15.into_push_pull_output(Level::High);
-        let button = gpio.p0_13.into_floating_input().degrade();
-
-        // Get bluetooth device address
-        let device_address = get_device_address();
-        rprintln!("Bluetooth device address: {:?}", device_address);
-
-        // Initialize radio
-        let mut radio = BleRadio::new(RADIO, &FICR, cx.local.ble_tx_buf, cx.local.ble_rx_buf);
-
-        // Create bluetooth TX/RX queues
-        let (tx, tx_cons) = cx.local.tx_queue.split();
-        let (rx_prod, rx) = cx.local.rx_queue.split();
-
-        // Create the actual BLE stack objects
-        let mut ble_ll = LinkLayer::<AppConfig>::new(device_address, ble_timer);
-        let ble_r = Responder::<AppConfig>::new(
-            tx,
-            rx,
-            L2CAPState::new(BleChannelMap::with_attributes(ble_attrs::KongleAttrs::new())),
-        );
-
-        // Send advertisement and set up regular interrupt
-        let next_update = ble_ll
-            .start_advertise(
-                RubbleDuration::from_millis(200),
-                &[AdStructure::CompleteLocalName("Kongle")],
-                &mut radio,
-                tx_cons,
-                rx_prod,
-            )
-            .unwrap();
-        ble_ll.timer().configure_interrupt(next_update);
-
-        // Set up SPI pins
-        let spi_clk = gpio.p0_02.into_push_pull_output(Level::Low).degrade();
-        let spi_mosi = gpio.p0_03.into_push_pull_output(Level::Low).degrade();
-        let spi_miso = gpio.p0_04.into_floating_input().degrade();
-        let spi_pins = hal::spim::Pins {
-            sck: Some(spi_clk),
-            miso: Some(spi_miso),
-            mosi: Some(spi_mosi),
-        };
-
-        // Set up LCD pins
-        // LCD_CS (P0.25): Chip select
-        let mut lcd_cs = gpio.p0_25.into_push_pull_output(Level::Low);
-        // LCD_RS (P0.18): Data/clock pin
-        let lcd_dc = gpio.p0_18.into_push_pull_output(Level::Low);
-        // LCD_RESET (P0.26): Display reset
-        let lcd_rst = gpio.p0_26.into_push_pull_output(Level::Low);
-
-        // Initialize SPI
-        let spi = hal::Spim::new(
-            SPIM1,
-            spi_pins,
-            // Use SPI at 8MHz (the fastest clock available on the nRF52832)
-            // because otherwise refreshing will be super slow.
-            hal::spim::Frequency::M8,
-            // SPI must be used in mode 3. Mode 0 (the default) won't work.
-            hal::spim::MODE_3,
-            0,
-        );
-
-        // Chip select must be held low while driving the display. It must be high
-        // when using other SPI devices on the same bus (such as external flash
-        // storage) so that the display controller won't respond to the wrong
-        // commands.
-        lcd_cs.set_low().unwrap();
-
-        // display interface abstraction from SPI and DC
-        let di = SPIInterfaceNoCS::new(spi, lcd_dc);
-
-        // Initialize LCD
-        let mut lcd = st7789::ST7789::new(di, Some(lcd_rst), None, LCD_W, LCD_H);
-        lcd.init(&mut lcd_delay).unwrap();
-        lcd.set_orientation(Orientation::Portrait).unwrap();
-
-        // Draw something onto the LCD
-        let backdrop_style = PrimitiveStyleBuilder::new()
-            .fill_color(BACKGROUND_COLOR)
-            .build();
-        Rectangle::new(Point::new(0, 0), Size::new(LCD_W as u32, LCD_H as u32))
-            .into_styled(backdrop_style)
-            .draw(&mut lcd)
-            .unwrap();
-
-        // Choose text style
-        // let text_style = TextStyleBuilder::new()
-        //     .font(&FONT_10X20)
-        //     .text_color(Rgb565::WHITE);
-        let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
-            .text_color(Rgb565::WHITE)
-            .build();
-
-        // Draw text
-        Text::new("Kongle PineTime", Point::new(10, 20), text_style)
-            .draw(&mut lcd)
-            .unwrap();
-
-        // Schedule tasks immediately
-        write_clock::spawn().unwrap();
-        increment_datetime::spawn().unwrap();
-        poll_button::spawn().unwrap();
-        show_battery_status::spawn().unwrap();
-        update_battery_status::spawn().unwrap();
-
-        (
-            Shared {
-                lcd,
-                battery,
-                // text_style,
-                radio,
-                ble_ll,
-                ble_r,
-
-                date_time,
-            },
-            Local {
-                backlight,
-                button,
-                button_debouncer: debounce_6(false),
-            },
-            init::Monotonics(mono),
-        )
+#[embassy_executor::task]
+async fn battery_task(
+    mut battery: device::battery::Battery<'static>,
+    sender: embassy_sync::watch::Sender<'static, CriticalSectionRawMutex, BatteryState, 2>,
+) {
+    battery.calibrate().await;
+    let mut ticker = Ticker::every(Duration::from_secs(10));
+    loop {
+        ticker.next().await;
+        let state = battery.update().await;
+        sender.send(state);
     }
+}
 
-    /// Hook up the RADIO interrupt to the Rubble BLE stack.
-    #[task(binds = RADIO, shared = [radio, ble_ll], priority = 3)]
-    fn radio(mut cx: radio::Context) {
-        cx.shared.ble_ll.lock(|ble_ll| {
-            cx.shared.radio.lock(|radio| {
-                if let Some(cmd) = radio.recv_interrupt(ble_ll.timer().now(), ble_ll) {
-                    radio.configure_receiver(cmd.radio);
-                    ble_ll.timer().configure_interrupt(cmd.next_update);
-
-                    if cmd.queued_work {
-                        // If there's any lower-priority work to be done, ensure that happens.
-                        // If we fail to spawn the task, it's already scheduled.
-                        ble_worker::spawn().ok();
-                    }
-                }
-            });
-        });
+#[embassy_executor::task]
+async fn button_task(
+    mut button: device::input::Button<'static>,
+    sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, InputEvent, 4>,
+) {
+    let mut ticker = Ticker::every(Duration::from_millis(10));
+    loop {
+        if let Some(event) = button.poll().await {
+            sender.send(event).await;
+        }
+        ticker.next().await;
     }
+}
 
-    /// Hook up the TIMER2 interrupt to the Rubble BLE stack.
-    #[task(binds = TIMER2, shared = [radio, ble_ll], priority = 3)]
-    fn timer2(mut cx: timer2::Context) {
-        cx.shared.ble_ll.lock(|ble_ll| {
-            cx.shared.radio.lock(|radio| {
-                let timer = ble_ll.timer();
-                if !timer.is_interrupt_pending() {
-                    return;
-                }
-                timer.clear_interrupt();
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    // Initialize Embassy with proper interrupt priorities
+    let mut config = embassy_nrf::config::Config::default();
+    config.gpiote_interrupt_priority = Priority::P2;
+    config.time_interrupt_priority = Priority::P2;
+    let p = embassy_nrf::init(config);
 
-                let cmd = ble_ll.update_timer(&mut *radio);
-                radio.configure_receiver(cmd.radio);
+    // Button on P0.15 with pullup
+    let button = device::input::Button::new(Input::new(p.P0_15, Pull::Up));
 
-                ble_ll.timer().configure_interrupt(cmd.next_update);
+    // PineTime backlight pins (active-low): P0.14, P0.22, P0.23
+    let backlight_low = Output::new(p.P0_14, Level::High, OutputDrive::Standard);
+    let backlight_mid = Output::new(p.P0_22, Level::High, OutputDrive::Standard);
+    let backlight_high = Output::new(p.P0_23, Level::High, OutputDrive::Standard);
+    let mut backlight = device::Backlight::new(backlight_low, backlight_mid, backlight_high, 7);
+    backlight.set(7);
 
-                if cmd.queued_work {
-                    // If there's any lower-priority work to be done, ensure that happens.
-                    // If we fail to spawn the task, it's already scheduled.
-                    ble_worker::spawn().ok();
-                }
-            });
-        });
-    }
+    // PineTime display pins (adjust if your wiring differs)
+    let dc = Output::new(p.P0_18, Level::High, OutputDrive::Standard);
+    let cs = Output::new(p.P0_25, Level::High, OutputDrive::Standard);
+    let rst = Output::new(p.P0_26, Level::High, OutputDrive::Standard);
 
-    /// Lower-priority task spawned from RADIO and TIMER2 interrupts.
-    #[task(shared = [ble_r], priority = 2)]
-    fn ble_worker(mut cx: ble_worker::Context) {
-        // Fully drain the packet queue
-        cx.shared.ble_r.lock(|ble_r| {
-            while ble_r.has_work() {
-                ble_r.process_one().unwrap();
+    let spim = Spim::new_txonly(
+        p.TWISPI0,
+        Irqs,
+        p.P0_02, // SCK
+        p.P0_03, // MOSI
+        SpimConfig::default(),
+    );
+    let spi_dev = ExclusiveDevice::new_no_delay(spim, cs).unwrap();
+    let di = display_interface_spi::SPIInterface::new(spi_dev, dc);
+    let mut delay = Delay;
+    let mut display = Builder::new(ST7789, di)
+        .display_size(display_cfg::DISPLAY_WIDTH, display_cfg::DISPLAY_HEIGHT)
+        .display_offset(display_cfg::DISPLAY_OFFSET_X, display_cfg::DISPLAY_OFFSET_Y)
+        .orientation(display_cfg::DISPLAY_ORIENTATION)
+        .color_order(display_cfg::DISPLAY_COLOR_ORDER)
+        .invert_colors(display_cfg::DISPLAY_COLOR_INVERSION)
+        .reset_pin(rst)
+        .init(&mut delay)
+        .unwrap();
+
+    display.clear(display_cfg::BACKGROUND_COLOR).unwrap();
+
+    let time_font = &JETBRAINS_FONT_54_POINT_EXTRA_BOLD;
+    let time_style = MonoTextStyleBuilder::new()
+        .font(time_font)
+        .text_color(display_cfg::TEXT_COLOR)
+        .background_color(display_cfg::BACKGROUND_COLOR)
+        .build();
+    let seconds_font = &FONT_10X20;
+    let seconds_style = MonoTextStyleBuilder::new()
+        .font(seconds_font)
+        .text_color(display_cfg::TEXT_COLOR)
+        .background_color(display_cfg::BACKGROUND_COLOR)
+        .build();
+    let battery_style = MonoTextStyleBuilder::new()
+        .font(seconds_font)
+        .text_color(display_cfg::TEXT_COLOR)
+        .background_color(display_cfg::BACKGROUND_COLOR)
+        .build();
+
+    let time_pos = Point::new(display_cfg::TIME_POS_X, display_cfg::TIME_POS_Y);
+    let seconds_pos = Point::new(display_cfg::SECONDS_POS_X, display_cfg::SECONDS_POS_Y);
+    let battery_pos = Point::new(display_cfg::BATTERY_POS_X, display_cfg::BATTERY_POS_Y);
+    let time_bounds = display_cfg::text_bounds(time_font, display_cfg::TIME_CHARS, time_pos);
+    let seconds_bounds =
+        display_cfg::text_bounds(seconds_font, display_cfg::SECONDS_CHARS, seconds_pos);
+    let battery_bounds =
+        display_cfg::text_bounds(seconds_font, display_cfg::BATTERY_CHARS, battery_pos);
+    let clear_style = PrimitiveStyleBuilder::new()
+        .fill_color(display_cfg::BACKGROUND_COLOR)
+        .build();
+
+    let charge_pin = Input::new(p.P0_12, Pull::Up);
+    let channel = saadc::ChannelConfig::single_ended(p.P0_31);
+    let saadc = saadc::Saadc::new(p.SAADC, Irqs, saadc::Config::default(), [channel]);
+    let battery = device::battery::Battery::new(saadc, charge_pin);
+
+    spawner.spawn(clock_task(TIME_WATCH.sender())).unwrap();
+    spawner
+        .spawn(battery_task(battery, BATTERY_WATCH.sender()))
+        .unwrap();
+    spawner
+        .spawn(button_task(button, BUTTON_CH.sender()))
+        .unwrap();
+
+    defmt::info!("Kongle started");
+
+    let mut time_rx = TIME_WATCH.receiver().unwrap();
+    let mut battery_rx = BATTERY_WATCH.receiver().unwrap();
+    let button_rx = BUTTON_CH.receiver();
+
+    let mut last_time: Option<TimeState> = None;
+    let mut last_seconds: Option<u8> = None;
+    let mut last_battery: Option<BatteryState> = None;
+    let mut brightness: u8 = 7;
+    loop {
+        let time = time_rx.changed().await;
+        if last_time.map(|t| t.hours != time.hours || t.minutes != time.minutes).unwrap_or(true) {
+            time_bounds
+                .into_styled(clear_style)
+                .draw(&mut display)
+                .ok();
+            let mut time_text: String<8> = String::new();
+            let _ = write!(&mut time_text, "{:02}:{:02}", time.hours, time.minutes);
+            let _ = Text::new(&time_text, time_pos, time_style).draw(&mut display);
+        }
+        if last_seconds != Some(time.seconds) {
+            seconds_bounds
+                .into_styled(clear_style)
+                .draw(&mut display)
+                .ok();
+            let mut seconds_text: String<2> = String::new();
+            let _ = write!(&mut seconds_text, "{:02}", time.seconds);
+            let _ = Text::new(&seconds_text, seconds_pos, seconds_style).draw(&mut display);
+            last_seconds = Some(time.seconds);
+        }
+        last_time = Some(time);
+
+        if let Some(battery_state) = battery_rx.try_changed() {
+            if last_battery != Some(battery_state) {
+                battery_bounds
+                    .into_styled(clear_style)
+                    .draw(&mut display)
+                    .ok();
+                let mut battery_text: String<16> = String::new();
+                let volts = battery_state.mv / 1000;
+                let frac = (battery_state.mv % 1000) / 10;
+                let charging = if battery_state.charging { "+" } else { "" };
+                let _ = write!(
+                    &mut battery_text,
+                    "{}.{}V{} {}%",
+                    volts,
+                    frac,
+                    charging,
+                    battery_state.percent
+                );
+                let _ = Text::new(&battery_text, battery_pos, battery_style).draw(&mut display);
+                last_battery = Some(battery_state);
             }
-        })
-    }
-    #[task(shared = [date_time])]
-    fn increment_datetime(mut cx: increment_datetime::Context) {
-        increment_datetime::spawn_after(1000.millis()).unwrap();
+        }
 
-        // Increment date_time
-        cx.shared.date_time.lock(|date_time| {
-            *date_time += Duration::seconds(1);
-            if date_time.second() == 0 {
-                let _ = write_clock::spawn();
+        while let Ok(event) = button_rx.try_receive() {
+            if matches!(event, InputEvent::ButtonPressed) {
+                brightness = if brightness >= 7 { 1 } else { brightness + 1 };
+                backlight.set(brightness);
             }
-        });
-
-        rprintln!(
-            "date_time is {:?}",
-            cx.shared.date_time.lock(|date_time| *date_time)
-        );
-    }
-
-    #[task(shared = [lcd, date_time])]
-    fn write_clock(mut cx: write_clock::Context) {
-        rprintln!(
-            "written time is {:?}",
-            cx.shared.date_time.lock(|date_time| *date_time)
-        );
-
-        // Write time to the display
-        let time = cx.shared.date_time.lock(|date_time| *date_time).time();
-        let mut text: heapless::String<8> = String::new();
-        write!(&mut text, "{:02}:{:02}", time.hour(), time.minute(),).unwrap();
-
-        let text_style = MonoTextStyleBuilder::new()
-            .font(&JETBRAINS_FONT_54_POINT_EXTRA_BOLD)
-            .text_color(Rgb565::WHITE)
-            .background_color(BACKGROUND_COLOR)
-            .build();
-
-        let text = Text::new(&text, Point::new(5, LCD_H as i32 / 2 + 27), text_style);
-
-        cx.shared.lcd.lock(|lcd| {
-            text.draw(lcd).unwrap();
-        });
-    }
-
-    #[task(local = [button, button_debouncer])]
-    fn poll_button(cx: poll_button::Context) {
-        // Poll button
-        let pressed = cx.local.button.is_high().unwrap();
-        let edge = cx.local.button_debouncer.update(pressed);
-
-        // Dispatch event
-        if edge == Some(Edge::Rising) {
-            button_pressed::spawn().unwrap();
         }
 
-        // Re-schedule the timer interrupt in 2ms
-        poll_button::spawn_after(2.millis()).unwrap();
-    }
-
-    /// Called when button is pressed without bouncing for 12 (6 * 2) ms.
-    #[task(local = [backlight])]
-    fn button_pressed(cx: button_pressed::Context) {
-        if cx.local.backlight.get_brightness() < 7 {
-            cx.local.backlight.brighter();
-        } else {
-            cx.local.backlight.off();
-        }
-    }
-
-    /// Fetch the battery status from the hardware. Update the text if
-    /// something changed.
-    #[task(shared = [battery])]
-    fn update_battery_status(mut cx: update_battery_status::Context) {
-        let changed = cx.shared.battery.lock(|battery| battery.update());
-        if changed {
-            rprintln!("Battery status changed");
-            show_battery_status::spawn().unwrap();
-        }
-
-        // Re-schedule the timer interrupt in 1s
-        update_battery_status::spawn_after(1000.millis()).unwrap();
-    }
-
-    /// Show the battery status on the LCD.
-    #[task(shared = [battery, lcd])]
-    fn show_battery_status(mut cx: show_battery_status::Context) {
-        let mut voltage = 0;
-        let mut charging = false;
-
-        cx.shared.battery.lock(|battery| {
-            voltage = battery.voltage();
-            charging = battery.is_charging();
-        });
-
-        rprintln!(
-            "Battery status: {} ({})",
-            voltage,
-            if charging { "charging" } else { "discharging" },
-        );
-
-        // Show battery status in top right corner
-        let mut buf = [0u8; 6];
-        (voltage / 10).numtoa(10, &mut buf[0..1]);
-        buf[1] = b'.';
-        (voltage % 10).numtoa(10, &mut buf[2..3]);
-        buf[3] = b'V';
-        buf[4] = b'/';
-        buf[5] = if charging { b'C' } else { b'D' };
-        let status = core::str::from_utf8(&buf).unwrap();
-
-        let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
-            .text_color(Rgb565::WHITE)
-            .background_color(BACKGROUND_COLOR)
-            .build();
-
-        let text = Text::new(
-            status,
-            Point::new(
-                LCD_W as i32 - 60_i32 - MARGIN as i32,
-                LCD_H as i32 - 10 - MARGIN as i32,
-            ),
-            text_style,
-        );
-
-        cx.shared.lcd.lock(|lcd| {
-            text.draw(lcd).unwrap();
-        });
-    }
-
-    #[task(shared = [date_time])]
-    fn set_date_time(mut cx: set_date_time::Context, new_date_time: NaiveDateTime) {
-        rprintln!("Set date time to {:?}", new_date_time);
-        cx.shared.date_time.lock(|date_time| {
-            *date_time = new_date_time;
-        });
-        let _ = write_clock::spawn();
+        defmt::info!("heartbeat");
     }
 }
