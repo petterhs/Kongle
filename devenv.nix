@@ -9,6 +9,8 @@
     pkgs.openocd
     pkgs.gcc-arm-embedded-13
     pkgs.probe-rs-tools
+    pkgs.inetutils
+    pkgs.cargo-edit
   ];
 
   languages.rust = {

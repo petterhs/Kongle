@@ -15,7 +15,7 @@ use embassy_nrf::spim::{Config as SpimConfig, Spim};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch,
 };
-use embassy_time::{Delay, Duration, Ticker};
+use embassy_time::{Duration, Ticker, Timer};
 use embedded_graphics::{
     mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
     prelude::*,
@@ -71,7 +71,9 @@ fn panic() -> ! {
 }
 
 #[embassy_executor::task]
-async fn clock_task(sender: embassy_sync::watch::Sender<'static, CriticalSectionRawMutex, TimeState, 2>) {
+async fn clock_task(
+    sender: embassy_sync::watch::Sender<'static, CriticalSectionRawMutex, TimeState, 2>,
+) {
     let mut state = TimeState {
         hours: 12,
         minutes: 0,
@@ -92,9 +94,8 @@ async fn battery_task(
     sender: embassy_sync::watch::Sender<'static, CriticalSectionRawMutex, BatteryState, 2>,
 ) {
     battery.calibrate().await;
-    let mut ticker = Ticker::every(Duration::from_secs(10));
     loop {
-        ticker.next().await;
+        Timer::after(Duration::from_secs(10)).await;
         let state = battery.update().await;
         sender.send(state);
     }
@@ -105,19 +106,19 @@ async fn button_task(
     mut button: device::input::Button<'static>,
     sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, InputEvent, 4>,
 ) {
-    let mut ticker = Ticker::every(Duration::from_millis(10));
     loop {
         if let Some(event) = button.poll().await {
             sender.send(event).await;
         }
-        ticker.next().await;
+        // Small yield to avoid busy-waiting
+        embassy_futures::yield_now().await;
     }
 }
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    // Initialize Embassy with proper interrupt priorities
     let mut config = embassy_nrf::config::Config::default();
+    config.lfclk_source = embassy_nrf::config::LfclkSource::ExternalXtal;
     config.gpiote_interrupt_priority = Priority::P2;
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
@@ -146,7 +147,19 @@ async fn main(spawner: Spawner) {
     );
     let spi_dev = ExclusiveDevice::new_no_delay(spim, cs).unwrap();
     let di = display_interface_spi::SPIInterface::new(spi_dev, dc);
-    let mut delay = Delay;
+    
+    // Create a simple blocking delay instead of embassy_time::Delay
+    struct BlockingDelay;
+    impl embedded_hal::delay::DelayNs for BlockingDelay {
+        fn delay_ns(&mut self, ns: u32) {
+            // 64 MHz CPU, 64 cycles per microsecond, so ~64/1000 cycles per nanosecond
+            // Be conservative and use 1 cycle per 10ns
+            let cycles = ns / 10;
+            cortex_m::asm::delay(cycles);
+        }
+    }
+    let mut delay = BlockingDelay;
+    
     let mut display = Builder::new(ST7789, di)
         .display_size(display_cfg::DISPLAY_WIDTH, display_cfg::DISPLAY_HEIGHT)
         .display_offset(display_cfg::DISPLAY_OFFSET_X, display_cfg::DISPLAY_OFFSET_Y)
@@ -194,7 +207,9 @@ async fn main(spawner: Spawner) {
     let saadc = saadc::Saadc::new(p.SAADC, Irqs, saadc::Config::default(), [channel]);
     let battery = device::battery::Battery::new(saadc, charge_pin);
 
-    spawner.spawn(clock_task(TIME_WATCH.sender())).unwrap();
+    spawner
+        .spawn(clock_task(TIME_WATCH.sender()))
+        .unwrap();
     spawner
         .spawn(battery_task(battery, BATTERY_WATCH.sender()))
         .unwrap();
