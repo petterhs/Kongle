@@ -1,4 +1,6 @@
-use embedded_graphics::{geometry::Point, mono_font::MonoFont, primitives::Rectangle, geometry::Size};
+use embedded_graphics::{
+    geometry::Point, geometry::Size, mono_font::MonoFont, primitives::Rectangle,
+};
 use embedded_graphics::{pixelcolor::Rgb565, prelude::RgbColor};
 use mipidsi::options::{ColorInversion, ColorOrder, Orientation, Rotation};
 

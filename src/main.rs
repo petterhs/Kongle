@@ -12,9 +12,7 @@ use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::Priority;
 use embassy_nrf::saadc;
 use embassy_nrf::spim::{Config as SpimConfig, Spim};
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch,
-};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Ticker, Timer};
 use embedded_graphics::{
     mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
@@ -62,12 +60,15 @@ impl TimeState {
     }
 
     pub fn to_naive(&self) -> Option<NaiveDateTime> {
-        chrono::NaiveDate::from_ymd_opt(
-            self.year as i32,
-            self.month as u32,
-            self.day as u32,
-        )
-        .and_then(|d| chrono::NaiveTime::from_hms_opt(self.hours as u32, self.minutes as u32, self.seconds as u32).map(|t| d.and_time(t)))
+        chrono::NaiveDate::from_ymd_opt(self.year as i32, self.month as u32, self.day as u32)
+            .and_then(|d| {
+                chrono::NaiveTime::from_hms_opt(
+                    self.hours as u32,
+                    self.minutes as u32,
+                    self.seconds as u32,
+                )
+                .map(|t| d.and_time(t))
+            })
     }
 }
 
@@ -85,7 +86,12 @@ fn panic() -> ! {
 #[embassy_executor::task]
 async fn clock_task(
     sender: embassy_sync::watch::Sender<'static, CriticalSectionRawMutex, TimeState, 2>,
-    set_time_rx: embassy_sync::channel::Receiver<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
+    set_time_rx: embassy_sync::channel::Receiver<
+        'static,
+        CriticalSectionRawMutex,
+        NaiveDateTime,
+        1,
+    >,
 ) {
     let mut dt = NaiveDateTime::new(
         chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -132,9 +138,7 @@ async fn button_task(
 }
 
 #[embassy_executor::task]
-async fn run_controller(
-    controller_task: apache_nimble::controller::NimbleControllerTask,
-) {
+async fn run_controller(controller_task: apache_nimble::controller::NimbleControllerTask) {
     controller_task.run().await
 }
 
@@ -188,7 +192,7 @@ async fn main(spawner: Spawner) {
     );
     let spi_dev = ExclusiveDevice::new_no_delay(spim, cs).unwrap();
     let di = display_interface_spi::SPIInterface::new(spi_dev, dc);
-    
+
     // Create a simple blocking delay instead of embassy_time::Delay
     struct BlockingDelay;
     impl embedded_hal::delay::DelayNs for BlockingDelay {
@@ -200,7 +204,7 @@ async fn main(spawner: Spawner) {
         }
     }
     let mut delay = BlockingDelay;
-    
+
     let mut display = Builder::new(ST7789, di)
         .display_size(display_cfg::DISPLAY_WIDTH, display_cfg::DISPLAY_HEIGHT)
         .display_offset(display_cfg::DISPLAY_OFFSET_X, display_cfg::DISPLAY_OFFSET_Y)
@@ -279,11 +283,11 @@ async fn main(spawner: Spawner) {
     let mut brightness: u8 = 7;
     loop {
         let time = time_rx.changed().await;
-        if last_time.map(|t| t.hours != time.hours || t.minutes != time.minutes).unwrap_or(true) {
-            time_bounds
-                .into_styled(clear_style)
-                .draw(&mut display)
-                .ok();
+        if last_time
+            .map(|t| t.hours != time.hours || t.minutes != time.minutes)
+            .unwrap_or(true)
+        {
+            time_bounds.into_styled(clear_style).draw(&mut display).ok();
             let mut time_text: String<8> = String::new();
             let _ = write!(&mut time_text, "{:02}:{:02}", time.hours, time.minutes);
             let _ = Text::new(&time_text, time_pos, time_style).draw(&mut display);
@@ -313,10 +317,7 @@ async fn main(spawner: Spawner) {
                 let _ = write!(
                     &mut battery_text,
                     "{}.{}V{} {}%",
-                    volts,
-                    frac,
-                    charging,
-                    battery_state.percent
+                    volts, frac, charging, battery_state.percent
                 );
                 let _ = Text::new(&battery_text, battery_pos, battery_style).draw(&mut display);
                 last_battery = Some(battery_state);
