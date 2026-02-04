@@ -11,6 +11,8 @@
     pkgs.probe-rs-tools
     pkgs.inetutils
     pkgs.cargo-edit
+    pkgs.clang-tools
+    pkgs.libclang
   ];
 
   languages.rust = {
@@ -35,4 +37,9 @@
     echo "Running tests"
     git --version | grep --color=auto "${pkgs.git.version}"
   '';
+
+  env = {
+    LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+    BINDGEN_EXTRA_CLANG_ARGS = "--sysroot=${pkgs.gcc-arm-embedded-13}/arm-none-eabi";
+  };
 }

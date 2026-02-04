@@ -27,6 +27,7 @@ use heapless::String;
 use mipidsi::{models::ST7789, Builder};
 use panic_probe as _;
 
+use chrono::{Datelike, NaiveDateTime, Timelike};
 use device::battery::BatteryState;
 use device::display as display_cfg;
 use device::input::InputEvent;
@@ -37,33 +38,44 @@ embassy_nrf::bind_interrupts!(struct Irqs {
     SAADC => embassy_nrf::saadc::InterruptHandler;
 });
 
+/// Full date+time for display and BLE CTS (Current Time Service).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TimeState {
-    hours: u8,
-    minutes: u8,
-    seconds: u8,
+pub(crate) struct TimeState {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hours: u8,
+    pub minutes: u8,
+    pub seconds: u8,
 }
 
 impl TimeState {
-    fn tick(&mut self) {
-        self.seconds = self.seconds.wrapping_add(1);
-        if self.seconds >= 60 {
-            self.seconds = 0;
-            self.minutes = self.minutes.wrapping_add(1);
+    pub fn from_naive(dt: NaiveDateTime) -> Self {
+        Self {
+            year: dt.year().max(0).min(u16::MAX as i32) as u16,
+            month: dt.month() as u8,
+            day: dt.day() as u8,
+            hours: dt.hour() as u8,
+            minutes: dt.minute() as u8,
+            seconds: dt.second() as u8,
         }
-        if self.minutes >= 60 {
-            self.minutes = 0;
-            self.hours = self.hours.wrapping_add(1);
-        }
-        if self.hours >= 24 {
-            self.hours = 0;
-        }
+    }
+
+    pub fn to_naive(&self) -> Option<NaiveDateTime> {
+        chrono::NaiveDate::from_ymd_opt(
+            self.year as i32,
+            self.month as u32,
+            self.day as u32,
+        )
+        .and_then(|d| chrono::NaiveTime::from_hms_opt(self.hours as u32, self.minutes as u32, self.seconds as u32).map(|t| d.and_time(t)))
     }
 }
 
 static TIME_WATCH: Watch<CriticalSectionRawMutex, TimeState, 2> = Watch::new();
 static BATTERY_WATCH: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
 static BUTTON_CH: Channel<CriticalSectionRawMutex, InputEvent, 4> = Channel::new();
+/// Channel for BLE to send new date/time; clock_task applies it.
+pub(crate) static SET_TIME_CH: Channel<CriticalSectionRawMutex, NaiveDateTime, 1> = Channel::new();
 
 #[defmt::panic_handler]
 fn panic() -> ! {
@@ -73,18 +85,22 @@ fn panic() -> ! {
 #[embassy_executor::task]
 async fn clock_task(
     sender: embassy_sync::watch::Sender<'static, CriticalSectionRawMutex, TimeState, 2>,
+    set_time_rx: embassy_sync::channel::Receiver<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
 ) {
-    let mut state = TimeState {
-        hours: 12,
-        minutes: 0,
-        seconds: 0,
-    };
-    sender.send(state);
+    let mut dt = NaiveDateTime::new(
+        chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        chrono::NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
+    );
+    sender.send(TimeState::from_naive(dt));
     let mut ticker = Ticker::every(Duration::from_secs(1));
     loop {
         ticker.next().await;
-        state.tick();
-        sender.send(state);
+        if let Ok(new_dt) = set_time_rx.try_receive() {
+            dt = new_dt;
+        } else {
+            dt += chrono::Duration::seconds(1);
+        }
+        sender.send(TimeState::from_naive(dt));
     }
 }
 
@@ -115,13 +131,38 @@ async fn button_task(
     }
 }
 
+#[embassy_executor::task]
+async fn run_controller(
+    controller_task: apache_nimble::controller::NimbleControllerTask,
+) {
+    controller_task.run().await
+}
+
+#[embassy_executor::task]
+async fn ble_peripheral_task(
+    controller: apache_nimble::controller::NimbleController,
+    time_rx: embassy_sync::watch::Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
+    set_time_tx: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
+) {
+    ble::run(controller, time_rx, set_time_tx).await
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let mut config = embassy_nrf::config::Config::default();
+    config.hfclk_source = embassy_nrf::config::HfclkSource::ExternalXtal;
     config.lfclk_source = embassy_nrf::config::LfclkSource::ExternalXtal;
     config.gpiote_interrupt_priority = Priority::P2;
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
+
+    apache_nimble::initialize_nimble();
+    let controller = apache_nimble::controller::NimbleController::new();
+    spawner
+        .spawn(run_controller(controller.create_task()))
+        .unwrap();
+    // Wait for RNG to calm down before starting BLE peripheral
+    Timer::after(Duration::from_secs(1)).await;
 
     // Button on P0.15 with pullup
     let button = device::input::Button::new(Input::new(p.P0_15, Pull::Up));
@@ -208,13 +249,22 @@ async fn main(spawner: Spawner) {
     let battery = device::battery::Battery::new(saadc, charge_pin);
 
     spawner
-        .spawn(clock_task(TIME_WATCH.sender()))
+        .spawn(clock_task(TIME_WATCH.sender(), SET_TIME_CH.receiver()))
         .unwrap();
     spawner
         .spawn(battery_task(battery, BATTERY_WATCH.sender()))
         .unwrap();
     spawner
         .spawn(button_task(button, BUTTON_CH.sender()))
+        .unwrap();
+
+    let time_rx_ble = TIME_WATCH.receiver().unwrap();
+    spawner
+        .spawn(ble_peripheral_task(
+            controller,
+            time_rx_ble,
+            SET_TIME_CH.sender(),
+        ))
         .unwrap();
 
     defmt::info!("Kongle started");
