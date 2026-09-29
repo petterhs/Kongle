@@ -138,7 +138,7 @@ async fn button_task(
 }
 
 /// Feeds the MCUBoot bootloader's watchdog when it has already been started (~7 s timeout).
-/// If we don't feed it, the MCU resets and the bootloader reverts to the previous image.
+/// A missed feed resets the MCU; an unconfirmed trial image can then be reverted.
 #[embassy_executor::task]
 async fn wdt_task_1(mut h0: embassy_nrf::wdt::WatchdogHandle) {
     let mut ticker = Ticker::every(Duration::from_secs(3));
@@ -171,16 +171,8 @@ async fn main(spawner: Spawner) {
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
 
-    apache_nimble::initialize_nimble();
-    let controller = apache_nimble::controller::NimbleController::new();
-    spawner
-        .spawn(run_controller(controller.create_task()))
-        .unwrap();
-    // Wait for RNG to calm down before starting BLE peripheral
-    Timer::after(Duration::from_secs(1)).await;
-
     // When running under the MCUBoot bootloader, it starts the WDT before jumping here.
-    // We must feed it periodically or the MCU resets and the bootloader reverts.
+    // Adopt it before BLE initialization and its startup delay. This does not confirm a trial image.
     if let Some(wdt_config) = embassy_nrf::wdt::Config::try_new(&p.WDT) {
         defmt::info!(
             "WDT is running (bootloader started it); timeout_ticks={}",
@@ -195,6 +187,14 @@ async fn main(spawner: Spawner) {
     } else {
         defmt::info!("WDT not running (standalone mode)");
     }
+
+    apache_nimble::initialize_nimble();
+    let controller = apache_nimble::controller::NimbleController::new();
+    spawner
+        .spawn(run_controller(controller.create_task()))
+        .unwrap();
+    // Wait for RNG to calm down before starting BLE peripheral
+    Timer::after(Duration::from_secs(1)).await;
 
     // Button on P0.15 with pullup
     let button = device::input::Button::new(Input::new(p.P0_15, Pull::Up));

@@ -83,6 +83,15 @@ This is a debugger-flashed development baseline. Kongle does not yet implement a
 
 ## Contributing
 
+Run `devenv shell -- bash scripts/check.sh` for the same checks as CI: formatting,
+Clippy, both release layouts, image hash verification, shell syntax, and bootloader
+checksum. PRs and pushes to `master` upload the MCUBoot BIN and its matching ELF
+as development artifacts. These are not Nordic DFU ZIPs or published releases.
+
+Before merging boot or flashing changes, use the ST-Link development device to
+check standalone boot, MCUBoot boot, display and BLE time sync, and operation
+past the bootloader watchdog timeout. These hardware checks are separate from CI.
+
 Use feature branches and pull requests targeting `master`; the maintainer reviews and merges changes. Keep hardware results separate from build checks in PR descriptions. Run `cargo fmt --check`, `cargo clippy --locked --release --features mcuboot`, and both standalone and MCUBoot builds inside `devenv shell`. The lockfile pins the development environment; after upgrading the devenv CLI, `devenv update devenv` updates its modules without intentionally upgrading the other inputs.
 
 ## Inspiration

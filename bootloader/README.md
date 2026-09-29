@@ -3,6 +3,11 @@
 The bootloader binary used by Kongle comes from
 `https://github.com/InfiniTimeOrg/pinetime-mcuboot-bootloader/releases/tag/1.0.1`.
 
+The checked-in binary was compared byte-for-byte with that release's
+`bootloader-1.0.1.bin`. Run `sha256sum --check bootloader/SHA256SUMS` from the
+repository root to verify the pinned copy. This bootloader uses unsigned images;
+the image hash checks integrity, not publisher identity.
+
 Flash the `bootloader-1.0.1.bin` file in this directory to the PineTime using:
 
 ```bash
