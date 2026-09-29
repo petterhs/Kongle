@@ -29,7 +29,7 @@ This repository uses [`devenv`](https://devenv.sh/) (Nix-based) to provide a rep
 
 The canonical, currently used workflow for running and debugging the firmware is documented in `README.md` under `## Debug` and uses three terminals:
 
-1. `sudo bash ./debug.sh`
+1. `sudo bash scripts/debug.sh`
 2. `cargo run --release`
 3. `nc localhost 6969 | defmt-print -e target/thumbv7em-none-eabihf/release/kongle`
 
@@ -59,3 +59,11 @@ Notes for agents and tools:
   - Prefer reasoning about the code and configuration rather than relying on running build/flash/debug commands.
   - If commands must be run, invoke them through `devenv`, and **not** assume `cargo` or other tools are on the PATH by default.
   - Additional tools should be added to `devenv.nix` so they are available consistently for all contributors.
+
+### MCUBoot bootloader (PineTime)
+
+With `--features mcuboot`, Kongle is linked at `0x00008200` (see `memory_mcuboot.x`) for the [PineTime MCUBoot bootloader](https://github.com/InfiniTimeOrg/pinetime-mcuboot-bootloader). Without that feature, it uses `memory_standalone.x` at address zero. Run `bash scripts/build-mcuboot-image.sh` or `bash scripts/flash_app.sh` **inside** `devenv shell`; devenv provides objcopy and imgtool. The bootloader starts a watchdog (~7 s) before jumping to the application; Kongle adopts and feeds it. Feeding the watchdog is separate from confirming a trial image. BLE DFU reception and image confirmation are not implemented yet.
+
+## Collaboration
+
+Use feature branches and PRs targeting `master`; the maintainer reviews and merges manually. Use the configured Git identity without agent co-author trailers. Use the ST-Link-connected development device for hardware validation; closed devices include an InfiniTime daily driver. Report build checks and hardware checks separately, and review the collaboration process after the first few PRs.

@@ -26,7 +26,6 @@ Kongle is an [Embassy](https://embassy.dev/)-based Rust firmware for the [PineTi
 - [ ] Sensor services
 - [ ] Vibration
 
-
 ## Toolchain
 
 ```bash
@@ -44,9 +43,47 @@ cargo run --release
 
 Terminals:
 
-  1. `sudo bash ./debug.sh`
+  1. `sudo bash scripts/debug.sh` (or `cd scripts && sudo bash debug.sh`)
   2. `cargo run --release`
   3. `nc localhost 6969 | defmt-print -e target/thumbv7em-none-eabihf/release/kongle`
+
+## Two ways to run on dev kit with debugger
+
+- **Standalone (no bootloader)** – for rapid development: `cargo run --release` builds and flashes the firmware at `0x00000000`. Use this with the debug workflow above.
+- **With MCUBoot bootloader** – for testing with the bootloader use `scripts/flash_app.sh`, which builds with `--features mcuboot` (FLASH at `0x08200`) and flashes the wrapped image at `0x00008000`.
+
+## InfiniTime MCUBoot bootloader support
+
+Kongle can be run under the [Pinetime MCUBoot bootloader](https://github.com/InfiniTimeOrg/pinetime-mcuboot-bootloader).
+
+- **Flash the bootloader (once per device)**
+  From the repository root, with your debugger connected:
+
+  ```bash
+  sudo bash scripts/flash_bootloader.sh
+  ```
+
+- **Build and flash the application image**
+
+  ```bash
+  bash scripts/flash_app.sh
+  ```
+
+  (Run without `sudo` so the build sees your devenv env; the script uses `sudo` only for OpenOCD.)
+
+  This builds the firmware with `--features mcuboot` (separate from the standalone build), wraps it as an **unsigned MCUBoot image** (header `0x200`, slot `0x74000`, version from `Cargo.toml`), and programs and verifies it at `0x00008000` via OpenOCD. To build without flashing, run `bash scripts/build-mcuboot-image.sh`. OpenOCD starts RTT and stays running; view defmt output in another terminal:
+
+  ```bash
+  nc localhost 6969 | defmt-print -e target/mcuboot/thumbv7em-none-eabihf/release/kongle
+  ```
+
+On reset, the MCUBoot bootloader should show its logo and then start Kongle. The bootloader starts a watchdog (~7 s) before running the application; Kongle feeds it automatically when it detects the bootloader has already started it.
+
+This is a debugger-flashed development baseline. Kongle does not yet implement a BLE DFU receiver or confirm a trial image as permanent. Watchdog feeding does not confirm an update. Receiving and confirming Kongle-to-Kongle updates is the next milestone; the build script currently produces a BIN, not a Nordic DFU ZIP with an init packet.
+
+## Contributing
+
+Use feature branches and pull requests targeting `master`; the maintainer reviews and merges changes. Keep hardware results separate from build checks in PR descriptions. Run `cargo fmt --check`, `cargo clippy --locked --release --features mcuboot`, and both standalone and MCUBoot builds inside `devenv shell`. The lockfile pins the development environment; after upgrading the devenv CLI, `devenv update devenv` updates its modules without intentionally upgrading the other inputs.
 
 ## Inspiration
 

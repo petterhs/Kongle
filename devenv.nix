@@ -6,6 +6,7 @@
 {
   packages = [
     pkgs.git
+    pkgs.gh
     pkgs.openocd
     pkgs.gcc-arm-embedded-13
     pkgs.probe-rs-tools
@@ -13,6 +14,7 @@
     pkgs.cargo-edit
     pkgs.clang-tools
     pkgs.libclang
+    pkgs.mcuboot-imgtool
   ];
 
   languages.rust = {

@@ -1,15 +1,20 @@
 #!/bin/bash
 set -euo pipefail
 
-# Check if the application is built
-if [ ! -f ../target/thumbv7em-none-eabihf/release/kongle ]
-then
-    echo "Application not built. Run \"cargo build --release\" first."
+if [[ ${EUID} -eq 0 ]]; then
+    echo "Do not run this script with sudo. It will use sudo only for OpenOCD when needed." >&2
+    echo "Run: bash scripts/flash_app.sh" >&2
     exit 1
 fi
 
-# TODO: Create a binary that can be flashed to the device
-echo "App that supports the bootloader is not implemented yet."
-exit 1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-openocd -f ./openocd-stlink.ocd -f ./flash_application.ocd
+# build-mcuboot-image.sh will run "cargo build --release --features mcuboot" itself
+
+# Build a MCUBoot-wrapped image (as current user, so devenv env like LIBCLANG_PATH is available).
+cd "${REPO_ROOT}"
+bash "${SCRIPT_DIR}/build-mcuboot-image.sh"
+
+# Only openocd needs sudo (hardware access).
+sudo openocd -f "${SCRIPT_DIR}/openocd-stlink.ocd" -f "${SCRIPT_DIR}/flash_application.ocd"

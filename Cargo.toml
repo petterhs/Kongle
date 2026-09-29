@@ -59,6 +59,8 @@ time = { version = "0.3.46", default-features = false }
 [features]
 default = []
 baremetal = []
+# Link for MCUBoot primary slot (0x08200). Use for scripts/flash_app.sh; omit for cargo run --release.
+mcuboot = []
 
 [patch.crates-io]
 apache-nimble = { git = "https://github.com/petterhs/apache-nimble-sys.git", branch = "master" }

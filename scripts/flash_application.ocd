@@ -1,5 +1,8 @@
 init
 
-program ../target/thumbv7m-none-eabihf/release/kongle.bin 0x00008000
+program target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/pinetime-mcuboot-app-image.bin verify 0x00008000
 
-reset
+reset run
+
+rtt start
+rtt server start 6969 0

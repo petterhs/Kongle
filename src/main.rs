@@ -94,8 +94,8 @@ async fn clock_task(
     >,
 ) {
     let mut dt = NaiveDateTime::new(
-        chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        chrono::NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        chrono::NaiveTime::from_hms_opt(11, 0, 0).unwrap(),
     );
     sender.send(TimeState::from_naive(dt));
     let mut ticker = Ticker::every(Duration::from_secs(1));
@@ -137,6 +137,17 @@ async fn button_task(
     }
 }
 
+/// Feeds the MCUBoot bootloader's watchdog when it has already been started (~7 s timeout).
+/// If we don't feed it, the MCU resets and the bootloader reverts to the previous image.
+#[embassy_executor::task]
+async fn wdt_task_1(mut h0: embassy_nrf::wdt::WatchdogHandle) {
+    let mut ticker = Ticker::every(Duration::from_secs(3));
+    loop {
+        ticker.next().await;
+        h0.pet();
+    }
+}
+
 #[embassy_executor::task]
 async fn run_controller(controller_task: apache_nimble::controller::NimbleControllerTask) {
     controller_task.run().await
@@ -167,6 +178,23 @@ async fn main(spawner: Spawner) {
         .unwrap();
     // Wait for RNG to calm down before starting BLE peripheral
     Timer::after(Duration::from_secs(1)).await;
+
+    // When running under the MCUBoot bootloader, it starts the WDT before jumping here.
+    // We must feed it periodically or the MCU resets and the bootloader reverts.
+    if let Some(wdt_config) = embassy_nrf::wdt::Config::try_new(&p.WDT) {
+        defmt::info!(
+            "WDT is running (bootloader started it); timeout_ticks={}",
+            wdt_config.timeout_ticks
+        );
+        if let Ok((_, [h0])) = embassy_nrf::wdt::Watchdog::try_new::<_, 1>(p.WDT, wdt_config) {
+            defmt::info!("WDT acquired with 1 handle; spawning wdt_task");
+            spawner.spawn(wdt_task_1(h0)).unwrap();
+        } else {
+            defmt::warn!("WDT config/handle count mismatch; watchdog may timeout (bootloader may use >1 handle)");
+        }
+    } else {
+        defmt::info!("WDT not running (standalone mode)");
+    }
 
     // Button on P0.15 with pullup
     let button = device::input::Button::new(Input::new(p.P0_15, Pull::Up));
