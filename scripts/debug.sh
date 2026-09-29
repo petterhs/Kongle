@@ -3,7 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-openocd -f "${SCRIPT_DIR}/openocd-stlink.ocd" -c 'init; rtt start; rtt server start 6969 0; reset run'
+# Resolve the Nix store path before sudo resets PATH.
+sudo "$(command -v openocd)" -f "${SCRIPT_DIR}/openocd-stlink.ocd" -c 'init; rtt start; rtt server start 6969 0; reset run'
 
 # In another terminal: cargo run --release (for standalone) or just connect to RTT.
 # To see defmt output, use the ELF that matches what is running:

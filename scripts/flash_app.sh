@@ -17,4 +17,4 @@ cd "${REPO_ROOT}"
 bash "${SCRIPT_DIR}/build-mcuboot-image.sh"
 
 # Only openocd needs sudo (hardware access).
-sudo openocd -f "${SCRIPT_DIR}/openocd-stlink.ocd" -f "${SCRIPT_DIR}/flash_application.ocd"
+sudo "$(command -v openocd)" -f "${SCRIPT_DIR}/openocd-stlink.ocd" -f "${SCRIPT_DIR}/flash_application.ocd"

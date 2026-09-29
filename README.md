@@ -29,11 +29,11 @@ Kongle is an [Embassy](https://embassy.dev/)-based Rust firmware for the [PineTi
 ## Toolchain
 
 ```bash
-# Install the Cortex-M4F cross-compilation target
-rustup target add thumbv7em-none-eabihf
+# Load the pinned toolchain, Cortex-M4F target, and host tools
+devenv shell
 
 # Build release firmware
-cargo build --release
+cargo build --release --locked
 
 # (Optional) Run on a connected PineTime via your debug setup
 cargo run --release
@@ -41,9 +41,13 @@ cargo run --release
 
 ## Debug
 
+Enter `devenv shell` and run `install-debug-tools` once to install the pinned
+`defmt-print` RTT decoder for the host. Run the scripts below without sudo;
+they resolve OpenOCD from devenv before using sudo for hardware access.
+
 Terminals:
 
-  1. `sudo bash scripts/debug.sh` (or `cd scripts && sudo bash debug.sh`)
+  1. `bash scripts/debug.sh` (uses sudo only for OpenOCD)
   2. `cargo run --release`
   3. `nc localhost 6969 | defmt-print -e target/thumbv7em-none-eabihf/release/kongle`
 
@@ -60,7 +64,7 @@ Kongle can be run under the [Pinetime MCUBoot bootloader](https://github.com/Inf
   From the repository root, with your debugger connected:
 
   ```bash
-  sudo bash scripts/flash_bootloader.sh
+  bash scripts/flash_bootloader.sh
   ```
 
 - **Build and flash the application image**

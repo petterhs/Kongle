@@ -29,7 +29,7 @@ This repository uses [`devenv`](https://devenv.sh/) (Nix-based) to provide a rep
 
 The canonical, currently used workflow for running and debugging the firmware is documented in `README.md` under `## Debug` and uses three terminals:
 
-1. `sudo bash scripts/debug.sh`
+1. `bash scripts/debug.sh` (uses sudo only for OpenOCD)
 2. `cargo run --release`
 3. `nc localhost 6969 | defmt-print -e target/thumbv7em-none-eabihf/release/kongle`
 

@@ -24,6 +24,12 @@
   };
   languages.python.enable = true;
 
+  # defmt-print is not packaged in the pinned nixpkgs. Install a locked host
+  # tool explicitly, rather than relying on an old binary in the local state.
+  scripts.install-debug-tools.exec = ''
+    cargo install defmt-print --version 1.0.0 --locked --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget}
+  '';
+
   # https://devenv.sh/tasks/
   tasks = {
     "kongle:openocd" = {
