@@ -2,6 +2,7 @@
 #![no_main]
 
 mod ble;
+mod current_time;
 mod device;
 mod fonts;
 
@@ -11,7 +12,7 @@ use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::Priority;
 use embassy_nrf::saadc;
-use embassy_nrf::spim::{Config as SpimConfig, Spim};
+use embassy_nrf::spim::{Config as SpimConfig, Frequency, Spim, MODE_3};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Ticker, Timer};
 use embedded_graphics::{
@@ -129,11 +130,11 @@ async fn button_task(
     sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, InputEvent, 4>,
 ) {
     loop {
-        if let Some(event) = button.poll().await {
+        if let Some(event) = button.poll() {
             sender.send(event).await;
         }
-        // Small yield to avoid busy-waiting
-        embassy_futures::yield_now().await;
+        // Six samples at 10 ms intervals provide debounce without a busy loop.
+        Timer::after(Duration::from_millis(10)).await;
     }
 }
 
@@ -156,10 +157,11 @@ async fn run_controller(controller_task: apache_nimble::controller::NimbleContro
 #[embassy_executor::task]
 async fn ble_peripheral_task(
     controller: apache_nimble::controller::NimbleController,
+    address: [u8; 6],
     time_rx: embassy_sync::watch::Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
 ) {
-    ble::run(controller, time_rx, set_time_tx).await
+    ble::run(controller, address, time_rx, set_time_tx).await
 }
 
 #[embassy_executor::main]
@@ -196,8 +198,11 @@ async fn main(spawner: Spawner) {
     // Wait for RNG to calm down before starting BLE peripheral
     Timer::after(Duration::from_secs(1)).await;
 
-    // Button on P0.15 with pullup
-    let button = device::input::Button::new(Input::new(p.P0_15, Pull::Up));
+    // Active-high button input, with its supply driven by P0.15.
+    let button = device::input::Button::new(
+        Input::new(p.P0_13, Pull::Down),
+        Output::new(p.P0_15, Level::High, OutputDrive::Standard),
+    );
 
     // PineTime backlight pins (active-low): P0.14, P0.22, P0.23
     let backlight_low = Output::new(p.P0_14, Level::High, OutputDrive::Standard);
@@ -211,12 +216,15 @@ async fn main(spawner: Spawner) {
     let cs = Output::new(p.P0_25, Level::High, OutputDrive::Standard);
     let rst = Output::new(p.P0_26, Level::High, OutputDrive::Standard);
 
+    let mut spim_config = SpimConfig::default();
+    spim_config.mode = MODE_3;
+    spim_config.frequency = Frequency::M8;
     let spim = Spim::new_txonly(
         p.TWISPI0,
         Irqs,
         p.P0_02, // SCK
         p.P0_03, // MOSI
-        SpimConfig::default(),
+        spim_config,
     );
     let spi_dev = ExclusiveDevice::new_no_delay(spim, cs).unwrap();
     let di = display_interface_spi::SPIInterface::new(spi_dev, dc);
@@ -291,9 +299,14 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     let time_rx_ble = TIME_WATCH.receiver().unwrap();
+    // Factory-programmed device address, in Bluetooth little-endian byte order.
+    let low = embassy_nrf::pac::FICR.deviceaddr(0).read().to_le_bytes();
+    let high = embassy_nrf::pac::FICR.deviceaddr(1).read().to_le_bytes();
+    let address = [low[0], low[1], low[2], low[3], high[0], high[1] | 0xc0];
     spawner
         .spawn(ble_peripheral_task(
             controller,
+            address,
             time_rx_ble,
             SET_TIME_CH.sender(),
         ))
@@ -344,7 +357,7 @@ async fn main(spawner: Spawner) {
                 let charging = if battery_state.charging { "+" } else { "" };
                 let _ = write!(
                     &mut battery_text,
-                    "{}.{}V{} {}%",
+                    "{}.{:02}V{} {}%",
                     volts, frac, charging, battery_state.percent
                 );
                 let _ = Text::new(&battery_text, battery_pos, battery_style).draw(&mut display);

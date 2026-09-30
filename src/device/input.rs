@@ -1,6 +1,6 @@
 use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
 use defmt::Format;
-use embassy_nrf::gpio::Input;
+use embassy_nrf::gpio::{Input, Output};
 use embassy_time::{Duration, Timer};
 
 /// Button input events
@@ -14,22 +14,24 @@ pub enum InputEvent {
 /// Button handler for PineTime (simplified)
 pub struct Button<'d> {
     button_pin: Input<'d>,
+    _enable: Output<'d>,
     debouncer: Debouncer<u8, Repeat6>,
 }
 
 impl<'d> Button<'d> {
     /// Create new button handler
-    pub fn new(button_pin: Input<'d>) -> Self {
+    pub fn new(button_pin: Input<'d>, enable: Output<'d>) -> Self {
         Self {
             button_pin,
+            _enable: enable,
             debouncer: debounce_6(false),
         }
     }
 
     /// Poll button and return events
-    pub async fn poll(&mut self) -> Option<InputEvent> {
-        // PineTime button is active-low with pull-up.
-        let pressed = self.button_pin.is_low();
+    pub fn poll(&mut self) -> Option<InputEvent> {
+        // P0.15 supplies the button; P0.13 is active-high with a pull-down.
+        let pressed = self.is_pressed();
         let edge = self.debouncer.update(pressed);
 
         match edge {

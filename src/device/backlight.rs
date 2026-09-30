@@ -69,7 +69,7 @@ impl Backlight {
 
     /// Increase brightness by one level (wraps to 0 after 7)
     pub fn brighter(&mut self) {
-        self.set(self.brightness + 1);
+        self.set((self.brightness + 1) % 8);
     }
 
     /// Decrease brightness by one level (wraps to 7 after 0)

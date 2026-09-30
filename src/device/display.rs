@@ -25,7 +25,7 @@ pub const SECONDS_CHARS: u32 = 2;
 
 pub const BATTERY_POS_X: i32 = 10;
 pub const BATTERY_POS_Y: i32 = 18;
-pub const BATTERY_CHARS: u32 = 10;
+pub const BATTERY_CHARS: u32 = 11;
 
 pub fn text_bounds(font: &MonoFont, chars: u32, pos: Point) -> Rectangle {
     let char_w = font.character_size.width + font.character_spacing;
@@ -34,5 +34,8 @@ pub fn text_bounds(font: &MonoFont, chars: u32, pos: Point) -> Rectangle {
         .unwrap_or(0)
         .saturating_sub(font.character_spacing);
     let height = font.character_size.height;
-    Rectangle::new(pos, Size::new(width, height))
+    Rectangle::new(
+        pos - Point::new(0, font.baseline as i32),
+        Size::new(width, height),
+    )
 }

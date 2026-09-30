@@ -11,7 +11,7 @@ use static_cell::StaticCell;
 use trouble_host::prelude::DefaultPacketPool;
 use trouble_host::prelude::*;
 
-use crate::TimeState;
+use crate::{current_time::parse_cts, TimeState};
 
 /// Max number of connections
 const CONNECTIONS_MAX: usize = 1;
@@ -57,31 +57,16 @@ fn encode_cts(t: &TimeState) -> [u8; 10] {
     ]
 }
 
-/// Parse 10-byte CTS write into NaiveDateTime (same as master branch)
-fn parse_cts(data: &[u8]) -> Option<NaiveDateTime> {
-    if data.len() < 7 {
-        return None;
-    }
-    let year = u16::from_le_bytes([data[0], data[1]]) as i32;
-    let month = data[2];
-    let day = data[3];
-    let hour = data[4];
-    let minute = data[5];
-    let second = data[6];
-    let date = chrono::NaiveDate::from_ymd_opt(year, month as u32, day as u32)?;
-    let time = chrono::NaiveTime::from_hms_opt(hour as u32, minute as u32, second as u32)?;
-    Some(date.and_time(time))
-}
-
 /// Run the BLE stack: advertise "Kongle", expose CTS, handle read/write and set-time channel.
 pub async fn run<C>(
     controller: C,
+    address: [u8; 6],
     time_rx: Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
 ) where
     C: Controller + 'static,
 {
-    let address: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
+    let address = Address::random(address);
     defmt::info!("BLE address = {:?}", address);
 
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
@@ -154,20 +139,31 @@ async fn gatt_events_and_time_sync_task<P: PacketPool>(
                         true
                     }
                     GattConnectionEvent::Gatt { event } => {
-                        match &event {
-                            GattEvent::Read(_) => {}
-                            GattEvent::Write(event) => {
-                                let data = event.data();
-                                if data.len() >= 7 {
-                                    if let Some(dt) = parse_cts(data) {
-                                        defmt::info!("[gatt] Write Current Time received");
-                                        let _ = set_time_tx.try_send(dt);
-                                    }
+                        let error = match &event {
+                            GattEvent::Write(write)
+                                if write.handle()
+                                    == server.current_time_service.current_time.handle =>
+                            {
+                                let data = write.data();
+                                if data.len() != 10 {
+                                    Some(AttErrorCode::INVALID_ATTRIBUTE_VALUE_LENGTH)
+                                } else if let Some(dt) = parse_cts(data) {
+                                    // Acknowledged writes must actually reach the clock task.
+                                    set_time_tx
+                                        .try_send(dt)
+                                        .err()
+                                        .map(|_| AttErrorCode::INSUFFICIENT_RESOURCES)
+                                } else {
+                                    Some(AttErrorCode::VALUE_NOT_ALLOWED)
                                 }
                             }
-                            _ => {}
-                        }
-                        match event.accept() {
+                            _ => None,
+                        };
+                        let response = match error {
+                            Some(error) => event.reject(error),
+                            None => event.accept(),
+                        };
+                        match response {
                             Ok(reply) => reply.send().await,
                             Err(e) => defmt::warn!("[gatt] error sending response: {:?}", e),
                         }

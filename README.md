@@ -88,7 +88,7 @@ This is a debugger-flashed development baseline. Kongle does not yet implement a
 ## Contributing
 
 Run `devenv shell -- bash scripts/check.sh` for the same checks as CI: formatting,
-Clippy, both release layouts, image hash verification, shell syntax, and bootloader
+host regression tests for CTS parsing and display bounds, Clippy, both release layouts, image hash verification, shell syntax, and bootloader
 checksum. PRs and pushes to `master` upload the MCUBoot BIN and its matching ELF
 as development artifacts. CI also launches the RTT decoder to check its host
 runtime. These are not Nordic DFU ZIPs or published releases.
