@@ -2,7 +2,9 @@
   pkgs,
   ...
 }:
-
+let
+  defmtPrint = pkgs.callPackage ./nix/defmt-print.nix {};
+in
 {
   packages = [
     pkgs.git
@@ -15,6 +17,7 @@
     pkgs.clang-tools
     pkgs.libclang
     pkgs.mcuboot-imgtool
+    defmtPrint
   ];
 
   languages.rust = {
@@ -24,10 +27,10 @@
   };
   languages.python.enable = true;
 
-  # defmt-print is not packaged in the pinned nixpkgs. Install a locked host
-  # tool explicitly, rather than relying on an old binary in the local state.
-  scripts.install-debug-tools.exec = ''
-    cargo install defmt-print --version 1.0.0 --locked --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget}
+  # The old cargo-installed binary can outlive the Nix libraries it linked to.
+  # A script takes precedence over cargo-install/bin and selects the rooted tool.
+  scripts.defmt-print.exec = ''
+    exec ${defmtPrint}/bin/defmt-print "$@"
   '';
 
   # https://devenv.sh/tasks/

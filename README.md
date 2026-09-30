@@ -41,8 +41,8 @@ cargo run --release
 
 ## Debug
 
-Enter `devenv shell` and run `install-debug-tools` once to install the pinned
-`defmt-print` RTT decoder for the host. Run the scripts below without sudo;
+Enter `devenv shell`; it provides the pinned `defmt-print` RTT decoder and its
+runtime libraries through Nix. Run the scripts below without sudo;
 they resolve OpenOCD from devenv before using sudo for hardware access.
 
 Terminals:
@@ -90,7 +90,8 @@ This is a debugger-flashed development baseline. Kongle does not yet implement a
 Run `devenv shell -- bash scripts/check.sh` for the same checks as CI: formatting,
 Clippy, both release layouts, image hash verification, shell syntax, and bootloader
 checksum. PRs and pushes to `master` upload the MCUBoot BIN and its matching ELF
-as development artifacts. These are not Nordic DFU ZIPs or published releases.
+as development artifacts. CI also launches the RTT decoder to check its host
+runtime. These are not Nordic DFU ZIPs or published releases.
 
 Before merging boot or flashing changes, use the ST-Link development device to
 check standalone boot, MCUBoot boot, display and BLE time sync, and operation
