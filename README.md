@@ -85,6 +85,10 @@ On reset, the MCUBoot bootloader should show its logo and then start Kongle. Imm
 
 This is a debugger-flashed development baseline. Kongle does not yet implement a BLE DFU receiver or confirm a trial image as permanent. Watchdog feeding does not confirm an update. Receiving and confirming Kongle-to-Kongle updates is the next milestone; the build script currently produces a BIN, not a Nordic DFU ZIP with an init packet.
 
+The [OTA development sequence](docs/ota.md) describes the watch progress UI,
+long-hold restart into the bootloader's recovery menu, and the gated
+secondary-slot activation code. These do not yet make Kongle OTA-capable.
+
 ## Contributing
 
 Run `devenv shell -- bash scripts/check.sh` for the same checks as CI: formatting,

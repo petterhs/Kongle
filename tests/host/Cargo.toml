@@ -4,6 +4,9 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[features]
+ota-activation = []
+
 [dependencies]
 # Match the firmware lockfile so these tests exercise the same implementations.
 chrono = { version = "=0.4.43", default-features = false }

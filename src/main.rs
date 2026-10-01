@@ -5,6 +5,7 @@ mod ble;
 mod current_time;
 mod device;
 mod fonts;
+mod ota;
 
 use core::fmt::Write;
 use defmt_rtt as _;
@@ -14,7 +15,7 @@ use embassy_nrf::interrupt::Priority;
 use embassy_nrf::saadc;
 use embassy_nrf::spim::{Config as SpimConfig, Frequency, Spim, MODE_3};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_graphics::{
     mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
     prelude::*,
@@ -31,6 +32,7 @@ use device::battery::BatteryState;
 use device::display as display_cfg;
 use device::input::InputEvent;
 use fonts::JETBRAINS_FONT_54_POINT_EXTRA_BOLD;
+use ota::UpdateStatus;
 
 embassy_nrf::bind_interrupts!(struct Irqs {
     TWISPI0 => embassy_nrf::spim::InterruptHandler<embassy_nrf::peripherals::TWISPI0>;
@@ -76,6 +78,8 @@ impl TimeState {
 static TIME_WATCH: Watch<CriticalSectionRawMutex, TimeState, 2> = Watch::new();
 static BATTERY_WATCH: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
 static BUTTON_CH: Channel<CriticalSectionRawMutex, InputEvent, 4> = Channel::new();
+/// The future BLE receiver publishes progress here; the display owns the view.
+pub(crate) static OTA_WATCH: Watch<CriticalSectionRawMutex, UpdateStatus, 2> = Watch::new();
 /// Channel for BLE to send new date/time; clock_task applies it.
 pub(crate) static SET_TIME_CH: Channel<CriticalSectionRawMutex, NaiveDateTime, 1> = Channel::new();
 
@@ -129,9 +133,30 @@ async fn button_task(
     mut button: device::input::Button<'static>,
     sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, InputEvent, 4>,
 ) {
+    let mut pressed_since = None;
+    let mut held_sent = false;
     loop {
         if let Some(event) = button.poll() {
+            match event {
+                InputEvent::ButtonPressed => {
+                    pressed_since = Some(Instant::now());
+                    held_sent = false;
+                }
+                InputEvent::ButtonReleased => {
+                    pressed_since = None;
+                    held_sent = false;
+                }
+                _ => {}
+            }
             sender.send(event).await;
+        }
+        if !held_sent
+            && pressed_since
+                .map(|start| start.elapsed() >= Duration::from_secs(3))
+                .unwrap_or(false)
+        {
+            held_sent = true;
+            sender.send(InputEvent::ButtonHeld).await;
         }
         // Six samples at 10 ms intervals provide debounce without a busy loop.
         Timer::after(Duration::from_millis(10)).await;
@@ -270,15 +295,19 @@ async fn main(spawner: Spawner) {
         .text_color(display_cfg::TEXT_COLOR)
         .background_color(display_cfg::BACKGROUND_COLOR)
         .build();
+    let update_style = battery_style;
 
     let time_pos = Point::new(display_cfg::TIME_POS_X, display_cfg::TIME_POS_Y);
     let seconds_pos = Point::new(display_cfg::SECONDS_POS_X, display_cfg::SECONDS_POS_Y);
     let battery_pos = Point::new(display_cfg::BATTERY_POS_X, display_cfg::BATTERY_POS_Y);
+    let update_pos = Point::new(display_cfg::UPDATE_POS_X, display_cfg::UPDATE_POS_Y);
     let time_bounds = display_cfg::text_bounds(time_font, display_cfg::TIME_CHARS, time_pos);
     let seconds_bounds =
         display_cfg::text_bounds(seconds_font, display_cfg::SECONDS_CHARS, seconds_pos);
     let battery_bounds =
         display_cfg::text_bounds(seconds_font, display_cfg::BATTERY_CHARS, battery_pos);
+    let update_bounds =
+        display_cfg::text_bounds(seconds_font, display_cfg::UPDATE_CHARS, update_pos);
     let clear_style = PrimitiveStyleBuilder::new()
         .fill_color(display_cfg::BACKGROUND_COLOR)
         .build();
@@ -303,6 +332,7 @@ async fn main(spawner: Spawner) {
     let low = embassy_nrf::pac::FICR.deviceaddr(0).read().to_le_bytes();
     let high = embassy_nrf::pac::FICR.deviceaddr(1).read().to_le_bytes();
     let address = [low[0], low[1], low[2], low[3], high[0], high[1] | 0xc0];
+    OTA_WATCH.sender().send(UpdateStatus::Idle);
     spawner
         .spawn(ble_peripheral_task(
             controller,
@@ -316,6 +346,7 @@ async fn main(spawner: Spawner) {
 
     let mut time_rx = TIME_WATCH.receiver().unwrap();
     let mut battery_rx = BATTERY_WATCH.receiver().unwrap();
+    let mut ota_rx = OTA_WATCH.receiver().unwrap();
     let button_rx = BUTTON_CH.receiver();
 
     let mut last_time: Option<TimeState> = None;
@@ -324,12 +355,40 @@ async fn main(spawner: Spawner) {
     let mut brightness: u8 = 7;
     loop {
         match embassy_futures::select::select(
-            time_rx.changed(),
-            embassy_futures::select::select(battery_rx.changed(), button_rx.receive()),
+            ota_rx.changed(),
+            embassy_futures::select::select(
+                time_rx.changed(),
+                embassy_futures::select::select(battery_rx.changed(), button_rx.receive()),
+            ),
         )
         .await
         {
-            embassy_futures::select::Either::First(time) => {
+            embassy_futures::select::Either::First(status) => {
+                update_bounds
+                    .into_styled(clear_style)
+                    .draw(&mut display)
+                    .ok();
+                let mut text: String<22> = String::new();
+                match status {
+                    UpdateStatus::Idle => {}
+                    UpdateStatus::Receiving { .. } => {
+                        let _ = write!(&mut text, "Update {}%", status.percent().unwrap_or(0));
+                    }
+                    UpdateStatus::Validating => {
+                        let _ = text.push_str("Verifying update");
+                    }
+                    UpdateStatus::ReadyToRestart => {
+                        let _ = text.push_str("Update ready");
+                    }
+                    UpdateStatus::Failed => {
+                        let _ = text.push_str("Update failed");
+                    }
+                }
+                let _ = Text::new(&text, update_pos, update_style).draw(&mut display);
+            }
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::First(
+                time,
+            )) => {
                 if last_time
                     .map(|t| t.hours != time.hours || t.minutes != time.minutes)
                     .unwrap_or(true)
@@ -351,8 +410,8 @@ async fn main(spawner: Spawner) {
                 }
                 last_time = Some(time);
             }
-            embassy_futures::select::Either::Second(embassy_futures::select::Either::First(
-                battery_state,
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                embassy_futures::select::Either::First(battery_state),
             )) => {
                 if last_battery != Some(battery_state) {
                     battery_bounds
@@ -373,11 +432,16 @@ async fn main(spawner: Spawner) {
                 }
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
-                event,
+                embassy_futures::select::Either::Second(event),
             )) => {
                 if matches!(event, InputEvent::ButtonPressed) {
                     brightness = (brightness + 1) % 8;
                     backlight.set(brightness);
+                }
+                #[cfg(feature = "mcuboot")]
+                if matches!(event, InputEvent::ButtonHeld) {
+                    defmt::info!("Long hold: restarting into MCUBoot button menu");
+                    cortex_m::peripheral::SCB::sys_reset();
                 }
             }
         }

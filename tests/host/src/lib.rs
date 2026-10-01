@@ -4,6 +4,8 @@
 mod current_time;
 #[path = "../../../src/device/display.rs"]
 mod display;
+#[path = "../../../src/ota.rs"]
+mod ota;
 
 #[cfg(test)]
 mod tests {
@@ -84,5 +86,114 @@ mod tests {
         let clear = display::text_bounds(&FONT_10X20, display::BATTERY_CHARS, pos);
         assert!(clear.contains(text.top_left));
         assert!(clear.contains(text.bottom_right().unwrap()));
+    }
+
+    #[test]
+    fn ota_progress_is_bounded_and_never_claims_validation() {
+        assert_eq!(
+            ota::UpdateStatus::Receiving {
+                received: 1,
+                total: 3
+            }
+            .percent(),
+            Some(33)
+        );
+        assert_eq!(
+            ota::UpdateStatus::Receiving {
+                received: 4,
+                total: 3
+            }
+            .percent(),
+            Some(100)
+        );
+        assert_eq!(
+            ota::UpdateStatus::Receiving {
+                received: 0,
+                total: 0
+            }
+            .percent(),
+            None
+        );
+        assert_eq!(ota::UpdateStatus::Validating.percent(), None);
+    }
+
+    #[test]
+    fn mcuboot_magic_is_at_the_end_of_the_secondary_slot() {
+        assert_eq!(ota::TRAILER_MAGIC_ADDRESS, 0x000b_3ff0);
+        assert_eq!(
+            ota::TRAILER_MAGIC,
+            [
+                0x77, 0xc2, 0x95, 0xf3, 0x60, 0xd2, 0xef, 0x7f, 0x35, 0x52, 0x50, 0x0f, 0x2c, 0xb6,
+                0x79, 0x80
+            ]
+        );
+    }
+
+    #[test]
+    fn activation_requires_full_valid_mcuboot_readback() {
+        let mut header = [0; 16];
+        header[..4].copy_from_slice(&[0x3d, 0xb8, 0xf3, 0x96]);
+        header[8..10].copy_from_slice(&0x200u16.to_le_bytes());
+        header[12..16].copy_from_slice(&0x3e00u32.to_le_bytes());
+        assert!(
+            ota::ActivationPlan::from_readback(0x4000, 0x4000, 0x1234, 0x1234, &header).is_some()
+        );
+        assert!(
+            ota::ActivationPlan::from_readback(0x3fff, 0x4000, 0x1234, 0x1234, &header).is_none()
+        );
+        assert!(
+            ota::ActivationPlan::from_readback(0x4000, 0x4000, 0x1234, 0x1235, &header).is_none()
+        );
+        assert!(ota::ActivationPlan::from_readback(
+            ota::SECONDARY_SLOT_SIZE,
+            ota::SECONDARY_SLOT_SIZE,
+            0x1234,
+            0x1234,
+            &header
+        )
+        .is_none());
+        header[0] = 0;
+        assert!(
+            ota::ActivationPlan::from_readback(0x4000, 0x4000, 0x1234, 0x1234, &header).is_none()
+        );
+    }
+
+    #[cfg(feature = "ota-activation")]
+    #[test]
+    fn activation_writes_only_trailer_magic_and_checks_readback() {
+        struct Flash {
+            written: Option<(u32, Vec<u8>)>,
+            corrupt_readback: bool,
+        }
+        impl ota::SecondarySlotFlash for Flash {
+            fn write(&mut self, address: u32, data: &[u8]) -> Result<(), ()> {
+                self.written = Some((address, data.to_vec()));
+                Ok(())
+            }
+            fn read(&mut self, _address: u32, data: &mut [u8]) -> Result<(), ()> {
+                data.copy_from_slice(&ota::TRAILER_MAGIC);
+                if self.corrupt_readback {
+                    data[0] ^= 1;
+                }
+                Ok(())
+            }
+        }
+        let mut header = [0; 16];
+        header[..4].copy_from_slice(&[0x3d, 0xb8, 0xf3, 0x96]);
+        header[8..10].copy_from_slice(&0x200u16.to_le_bytes());
+        header[12..16].copy_from_slice(&0x3e00u32.to_le_bytes());
+        let plan = ota::ActivationPlan::from_readback(0x4000, 0x4000, 1, 1, &header).unwrap();
+        let mut flash = Flash {
+            written: None,
+            corrupt_readback: false,
+        };
+        assert!(plan.mark_pending(&mut flash).is_ok());
+        assert_eq!(
+            flash.written,
+            Some((ota::TRAILER_MAGIC_ADDRESS, ota::TRAILER_MAGIC.to_vec()))
+        );
+        let plan = ota::ActivationPlan::from_readback(0x4000, 0x4000, 1, 1, &header).unwrap();
+        flash.corrupt_readback = true;
+        assert!(plan.mark_pending(&mut flash).is_err());
     }
 }

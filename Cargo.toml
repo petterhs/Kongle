@@ -61,6 +61,9 @@ default = []
 baremetal = []
 # Link for MCUBoot primary slot (0x08200). Use for scripts/flash_app.sh; omit for cargo run --release.
 mcuboot = []
+# Compiles the pending-image trailer writer. No production call site or SPI
+# implementation exists yet; enabling this alone cannot activate an image.
+ota-activation = ["mcuboot"]
 
 [workspace]
 members = ["tests/host"]
