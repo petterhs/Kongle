@@ -10,7 +10,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# build-mcuboot-image.sh will run "cargo build --release --features mcuboot" itself
+# build-mcuboot-image.sh uses mcuboot by default or KONGLE_FEATURES when set.
 
 # Build a MCUBoot-wrapped image (as current user, so devenv env like LIBCLANG_PATH is available).
 cd "${REPO_ROOT}"

@@ -4,16 +4,21 @@
 mod ble;
 mod current_time;
 mod device;
+mod dfu;
+mod flash;
 mod fonts;
 mod ota;
 
+use core::cell::RefCell;
 use core::fmt::Write;
 use defmt_rtt as _;
+use embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice as SharedSpiDevice;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::Priority;
 use embassy_nrf::saadc;
 use embassy_nrf::spim::{Config as SpimConfig, Frequency, Spim, MODE_3};
+use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_graphics::{
@@ -22,10 +27,10 @@ use embedded_graphics::{
     primitives::PrimitiveStyleBuilder,
     text::Text,
 };
-use embedded_hal_bus::spi::ExclusiveDevice;
 use heapless::String;
 use mipidsi::{models::ST7789, Builder};
 use panic_probe as _;
+use static_cell::StaticCell;
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use device::battery::BatteryState;
@@ -78,6 +83,8 @@ impl TimeState {
 static TIME_WATCH: Watch<CriticalSectionRawMutex, TimeState, 2> = Watch::new();
 static BATTERY_WATCH: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
 static BUTTON_CH: Channel<CriticalSectionRawMutex, InputEvent, 4> = Channel::new();
+static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
+type FlashSpi = SharedSpiDevice<'static, NoopRawMutex, Spim<'static>, Output<'static>>;
 /// The future BLE receiver publishes progress here; the display owns the view.
 pub(crate) static OTA_WATCH: Watch<CriticalSectionRawMutex, UpdateStatus, 2> = Watch::new();
 /// Channel for BLE to send new date/time; clock_task applies it.
@@ -185,8 +192,9 @@ async fn ble_peripheral_task(
     address: [u8; 6],
     time_rx: embassy_sync::watch::Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
+    flash: flash::Flash<FlashSpi>,
 ) {
-    ble::run(controller, address, time_rx, set_time_tx).await
+    ble::run(controller, address, time_rx, set_time_tx, flash).await
 }
 
 #[embassy_executor::main]
@@ -244,14 +252,18 @@ async fn main(spawner: Spawner) {
     let mut spim_config = SpimConfig::default();
     spim_config.mode = MODE_3;
     spim_config.frequency = Frequency::M8;
-    let spim = Spim::new_txonly(
+    let spim = Spim::new(
         p.TWISPI0,
         Irqs,
         p.P0_02, // SCK
+        p.P0_04, // MISO from external flash
         p.P0_03, // MOSI
         spim_config,
     );
-    let spi_dev = ExclusiveDevice::new_no_delay(spim, cs).unwrap();
+    let spi_bus = SPI_BUS.init(BlockingMutex::new(RefCell::new(spim)));
+    let spi_dev = SharedSpiDevice::new(spi_bus, cs);
+    let flash_cs = Output::new(p.P0_05, Level::High, OutputDrive::Standard);
+    let flash = flash::Flash::new(SharedSpiDevice::new(spi_bus, flash_cs));
     let di = display_interface_spi::SPIInterface::new(spi_dev, dc);
 
     // Create a simple blocking delay instead of embassy_time::Delay
@@ -339,6 +351,7 @@ async fn main(spawner: Spawner) {
             address,
             time_rx_ble,
             SET_TIME_CH.sender(),
+            flash,
         ))
         .unwrap();
 
@@ -371,11 +384,17 @@ async fn main(spawner: Spawner) {
                 let mut text: String<22> = String::new();
                 match status {
                     UpdateStatus::Idle => {}
+                    UpdateStatus::Erasing => {
+                        let _ = text.push_str("Preparing update");
+                    }
                     UpdateStatus::Receiving { .. } => {
                         let _ = write!(&mut text, "Update {}%", status.percent().unwrap_or(0));
                     }
                     UpdateStatus::Validating => {
                         let _ = text.push_str("Verifying update");
+                    }
+                    UpdateStatus::Staged => {
+                        let _ = text.push_str("Update staged");
                     }
                     UpdateStatus::ReadyToRestart => {
                         let _ = text.push_str("Update ready");

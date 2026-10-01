@@ -1,9 +1,14 @@
 # Kongle OTA development sequence
 
-This branch prepares the watch UI and the MCUBoot activation boundary. It does
-**not** accept firmware over BLE, write external flash, mark an image pending,
-or confirm a booted trial image. Keep the daily-driver watch on InfiniTime until
-the complete flow has passed development-board testing.
+This branch provides an **opt-in staging receiver** for the ST-Link development
+board. Builds with `--features mcuboot,ota-staging` accept application-only
+Nordic legacy DFU from Furu, erase and program the external secondary slot,
+read it back, and show transfer progress on the watch. Ordinary builds do not
+erase external flash. The receiver deliberately rejects the final validation
+request after a valid readback, so Furu reports that the update has **not**
+been installed. It does not mark an image pending or confirm a trial image.
+Keep the daily-driver watch on InfiniTime until the complete flow has passed
+development-board testing.
 
 ## Boot and recovery
 
@@ -21,23 +26,39 @@ and should be tested only after rollback and recovery work on the dev board.
 
 ## Receiver and activation work
 
-1. Add an external SPI flash driver for both PineTime flash variants. Verify
-   JEDEC ID, reads, sector erase, page boundaries, and readback using only the
-   secondary OTA slot (`0x40000..0xB4000`) on the development board. Never
-   erase the bootloader assets below `0x40000` or the filesystem above
-   `0xB4000`.
-2. Add InfiniTime-compatible Nordic **legacy** DFU GATT characteristics. Furu
-   already sends an application-only package over this protocol. Reject
-   invalid lengths, unsupported image types, out-of-order packets, and writes
-   beyond the secondary slot. Persist progress only after SPI writes succeed;
-   publish `UpdateStatus::Receiving` with the accepted and total byte counts.
-   Show verification, ready, and failure states separately from the percentage.
-3. Read the entire staged image back from SPI flash and compare its CRC16 with
-   the Nordic init packet. Check the MCUBoot header, its declared image size,
-   and the slot boundary. Only then create `ActivationPlan`. The optional
+The SPI driver shares the display bus on P0.02/03/04, with flash CS on P0.05.
+It accepts the two 4 MiB JEDEC flash families supported by the bootloader and
+restricts image writes to the OTA slot (`0x40000..0xB4000`). Erasure starts
+with the trailer sector and verifies that the old pending-image marker is gone
+before erasing the rest. It never touches bootloader assets below `0x40000` or
+the filesystem above `0xB4000`.
+
+Inside `devenv shell`, build and flash the development board with
+`KONGLE_FEATURES=mcuboot,ota-staging bash scripts/flash_app.sh`. Generate a
+matching test package with
+`KONGLE_FEATURES=mcuboot,ota-staging bash scripts/build-dfu-package.sh`.
+This produces `kongle-mcuboot-app-dfu-<version>.zip` under the MCUBoot build
+directory. The default `scripts/flash_app.sh` build uses `mcuboot` alone and
+does not enable staging.
+In Furu, enable the `infinitime.dfu` feature for the Kongle device profile
+before selecting the ZIP. Furu will transfer the image, then report a rejected
+validation. This is the expected result while activation is disconnected.
+
+Before enabling installation:
+
+1. Verify JEDEC ID, full-slot erase, page programming, readback, percentage,
+   interruption behavior, bad CRC rejection, and recovery from BLE disconnect
+   on the development board. Its stuck button means the button-hold path needs
+   a separate hardware test later; ST-Link reset can test the bootloader path.
+2. Verify the primary-trailer guard on hardware. It blocks staging when
+   `copy_done` indicates a swapped but unconfirmed trial image, because the
+   secondary slot may hold its rollback copy. Test a debugger-flashed primary,
+   confirmed image, and unconfirmed trial before allowing this on closed
+   devices. Keep staging opt-in until this is proven.
+3. Review the full readback CRC, MCUBoot header and size checks. The optional
    `ota-activation` feature compiles a trailer writer, but it has no production
-   call site or flash implementation. Keep it disconnected until the write and
-   readback sequence has been reviewed and tested on the development board.
+   caller or SPI implementation. Keep it disconnected until the write and
+   readback sequence has passed development-board testing.
 4. When enabling activation in a later PR, write the MCUBoot magic to the last
    16 bytes of the secondary slot only after verification, read it back, and
    reset only after the final DFU response has reached Furu. Test interrupted
@@ -47,10 +68,9 @@ and should be tested only after rollback and recovery work on the dev board.
    scenarios pass. Do not auto-confirm at startup: that would remove the
    bootloader's rollback safety net.
 
-The watch percentage means **bytes safely accepted**, not that the image is
-valid or installed. At 100%, show a separate verification state until the
-image is ready. Furu should likewise distinguish transfer completion from
-installation and reconnection after reboot.
+The watch percentage means **bytes written and read back from external flash**,
+not that the image is installed. Progress display updates only when the integer
+percentage changes; validation and staged states are shown separately.
 
 References: [PineTime bootloader](https://github.com/InfiniTimeOrg/pinetime-mcuboot-bootloader/tree/1.0.1),
 [InfiniTime DFU implementation](https://github.com/InfiniTimeOrg/InfiniTime/blob/main/src/components/ble/DfuService.cpp),

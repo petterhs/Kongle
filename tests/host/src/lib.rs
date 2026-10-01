@@ -118,6 +118,67 @@ mod tests {
     }
 
     #[test]
+    fn legacy_init_packet_and_crc_match_furu() {
+        let payload = b"123456789";
+        let crc = ota::crc16_update(0xffff, payload);
+        assert_eq!(crc, 0x29b1);
+        assert_eq!(
+            ota::crc16_update(ota::crc16_update(0xffff, &payload[..4]), &payload[4..]),
+            crc
+        );
+        let mut init = [0; 14];
+        init[..2].copy_from_slice(&0x0052u16.to_le_bytes());
+        init[8..10].copy_from_slice(&1u16.to_le_bytes());
+        init[12..14].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(ota::expected_crc16(&init), Some(crc));
+        init[0] = 0;
+        assert_eq!(ota::expected_crc16(&init), None);
+    }
+
+    #[test]
+    fn ota_erase_order_and_write_bounds_protect_other_partitions() {
+        assert_eq!(ota::SECONDARY_SECTORS, 116);
+        assert_eq!(ota::erase_sector_address(0), Some(0xB3000));
+        assert_eq!(ota::erase_sector_address(1), Some(0x40000));
+        assert_eq!(ota::erase_sector_address(115), Some(0xB2000));
+        assert_eq!(ota::erase_sector_address(116), None);
+        assert!(ota::image_range_ok(0x40000, ota::MAX_IMAGE_SIZE as usize));
+        assert!(!ota::image_range_ok(0x3ffff, 1));
+        assert!(!ota::image_range_ok(ota::TRAILER_MAGIC_ADDRESS, 1));
+        assert!(!ota::image_range_ok(u32::MAX, 2));
+    }
+
+    #[test]
+    fn dfu_rejects_oversize_and_truncated_packets() {
+        let mut size = [0; 12];
+        size[8..].copy_from_slice(&ota::MAX_IMAGE_SIZE.to_le_bytes());
+        assert_eq!(
+            ota::parse_application_size(&size),
+            Some(ota::MAX_IMAGE_SIZE)
+        );
+        size[8..].copy_from_slice(&(ota::MAX_IMAGE_SIZE + 1).to_le_bytes());
+        assert_eq!(ota::parse_application_size(&size), None);
+        size[0] = 1;
+        assert_eq!(ota::parse_application_size(&size), None);
+        assert!(ota::packet_len_ok(20, 21));
+        assert!(ota::packet_len_ok(1, 1));
+        assert!(!ota::packet_len_ok(1, 21));
+        assert!(!ota::packet_len_ok(21, 21));
+        assert!(!ota::packet_len_ok(0, 20));
+    }
+
+    #[test]
+    fn unconfirmed_trial_cannot_erase_rollback_slot() {
+        assert_eq!(ota::PRIMARY_COPY_DONE_ADDRESS, 0x7bfe4);
+        assert_eq!(ota::PRIMARY_IMAGE_OK_ADDRESS, 0x7bfe8);
+        assert!(ota::primary_allows_staging(u32::MAX, u32::MAX));
+        assert!(ota::primary_allows_staging(1, 1));
+        assert!(!ota::primary_allows_staging(1, u32::MAX));
+        assert!(!ota::primary_allows_staging(0, u32::MAX));
+        assert!(!ota::primary_allows_staging(0, 1));
+    }
+
+    #[test]
     fn mcuboot_magic_is_at_the_end_of_the_secondary_slot() {
         assert_eq!(ota::TRAILER_MAGIC_ADDRESS, 0x000b_3ff0);
         assert_eq!(
