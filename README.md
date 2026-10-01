@@ -17,7 +17,7 @@ Kongle is an [Embassy](https://embassy.dev/)-based Rust firmware for the [PineTi
   - [ ] Heartbeat sensor
   - [ ] Music Service
   - [ ] OTA updates (DFU)
-- [ ] InfiniTime bootloader support
+- [x] InfiniTime bootloader development support (MCUBoot boot and debugger flashing; BLE DFU and image confirmation remain incomplete)
 - [ ] Sleep mode and wake logic
 - [ ] Touch and gestures
 - [ ] Display menu and settings page

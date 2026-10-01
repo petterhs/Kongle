@@ -1,5 +1,6 @@
 init
 
+flash erase_address 0x00008000 0x00074000
 program target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/pinetime-mcuboot-app-image.bin verify 0x00008000
 
 reset run
