@@ -60,7 +60,9 @@ impl Format for Battery<'_> {
 
 fn adc_to_mv(raw: i16) -> u16 {
     let raw = raw.max(0) as i32;
-    let adc_mv = raw * 3600 / 2048;
+    // SAADC defaults to 12-bit resolution (0..=4095). The input divider halves
+    // the battery voltage, so double the measured pin voltage afterwards.
+    let adc_mv = raw * 3600 / 4096;
     let battery_mv = adc_mv * 2;
     battery_mv as u16
 }
