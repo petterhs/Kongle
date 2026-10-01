@@ -105,7 +105,7 @@ async fn clock_task(
         if let Ok(new_dt) = set_time_rx.try_receive() {
             dt = new_dt;
         } else {
-            dt += chrono::Duration::seconds(1);
+            dt = current_time::next_cts_second(dt);
         }
         sender.send(TimeState::from_naive(dt));
     }

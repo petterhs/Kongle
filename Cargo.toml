@@ -62,6 +62,10 @@ baremetal = []
 # Link for MCUBoot primary slot (0x08200). Use for scripts/flash_app.sh; omit for cargo run --release.
 mcuboot = []
 
+[workspace]
+members = ["tests/host"]
+resolver = "2"
+
 [patch.crates-io]
 apache-nimble = { git = "https://github.com/petterhs/apache-nimble-sys.git", branch = "master" }
 

@@ -132,6 +132,12 @@ async fn gatt_events_and_time_sync_task<P: PacketPool>(
     time_rx: &mut Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: &Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
 ) {
+    // Time updates are not consumed while advertising. Publish the latest one
+    // before the newly connected client can read the shared GATT attribute.
+    if let Some(t) = time_rx.try_changed() {
+        let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
+    }
+
     loop {
         match embassy_futures::select::select(
             async {

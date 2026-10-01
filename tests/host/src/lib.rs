@@ -64,6 +64,19 @@ mod tests {
     }
 
     #[test]
+    fn current_time_clock_saturates_at_maximum_cts_datetime() {
+        let max = chrono::NaiveDate::from_ymd_opt(9999, 12, 31)
+            .unwrap()
+            .and_hms_opt(23, 59, 59)
+            .unwrap();
+        assert_eq!(current_time::next_cts_second(max), max);
+        assert_eq!(
+            current_time::next_cts_second(max - chrono::Duration::seconds(1)),
+            max
+        );
+    }
+
+    #[test]
     fn battery_clear_covers_the_longest_text_at_its_baseline() {
         let pos = Point::new(display::BATTERY_POS_X, display::BATTERY_POS_Y);
         let style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);

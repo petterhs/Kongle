@@ -15,3 +15,15 @@ pub fn parse_cts(data: &[u8]) -> Option<NaiveDateTime> {
     let time = chrono::NaiveTime::from_hms_opt(data[4] as u32, data[5] as u32, data[6] as u32)?;
     Some(date.and_time(time))
 }
+
+/// Advance one second without publishing a year outside the CTS range.
+pub fn next_cts_second(now: NaiveDateTime) -> NaiveDateTime {
+    let max = chrono::NaiveDate::from_ymd_opt(9999, 12, 31)
+        .and_then(|date| date.and_hms_opt(23, 59, 59))
+        .expect("maximum CTS datetime is valid");
+    if now >= max {
+        max
+    } else {
+        now + chrono::Duration::seconds(1)
+    }
+}
