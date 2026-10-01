@@ -12,5 +12,7 @@ bash scripts/build-mcuboot-image.sh
 defmt-print -e target/thumbv7em-none-eabihf/release/kongle </dev/null
 defmt-print -e target/mcuboot/thumbv7em-none-eabihf/release/kongle </dev/null
 imgtool verify target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/pinetime-mcuboot-app-image.bin
-bash -n scripts/*.sh
+for script in scripts/*.sh; do
+    bash -n "$script"
+done
 sha256sum --check bootloader/SHA256SUMS

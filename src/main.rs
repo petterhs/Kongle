@@ -138,7 +138,7 @@ async fn button_task(
     }
 }
 
-/// Feeds the MCUBoot bootloader's watchdog when it has already been started (2 s timeout).
+/// Feeds the MCUBoot bootloader's watchdog when it has already been started (7 s timeout).
 /// A missed feed resets the MCU; an unconfirmed trial image can then be reverted.
 #[embassy_executor::task]
 async fn wdt_task_1(mut h0: embassy_nrf::wdt::WatchdogHandle) {
@@ -376,7 +376,7 @@ async fn main(spawner: Spawner) {
                 event,
             )) => {
                 if matches!(event, InputEvent::ButtonPressed) {
-                    brightness = if brightness >= 7 { 1 } else { brightness + 1 };
+                    brightness = (brightness + 1) % 8;
                     backlight.set(brightness);
                 }
             }

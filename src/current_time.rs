@@ -6,6 +6,11 @@ pub fn parse_cts(data: &[u8]) -> Option<NaiveDateTime> {
         return None;
     }
     let year = u16::from_le_bytes([data[0], data[1]]) as i32;
+    // Bluetooth Current Time Service permits years 1582–9999 and weekday 0
+    // (unknown) through 7 (Sunday).
+    if !(1582..=9999).contains(&year) || data[7] > 7 {
+        return None;
+    }
     let date = chrono::NaiveDate::from_ymd_opt(year, data[2] as u32, data[3] as u32)?;
     let time = chrono::NaiveTime::from_hms_opt(data[4] as u32, data[5] as u32, data[6] as u32)?;
     Some(date.and_time(time))

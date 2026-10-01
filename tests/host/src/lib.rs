@@ -40,6 +40,30 @@ mod tests {
     }
 
     #[test]
+    fn current_time_enforces_cts_year_and_weekday_ranges() {
+        let mut value = [0x2e, 0x06, 1, 1, 0, 0, 0, 0, 0, 0]; // 1582
+        assert!(current_time::parse_cts(&value).is_some());
+
+        value[0] = 0;
+        value[1] = 0; // 0
+        assert!(current_time::parse_cts(&value).is_none());
+
+        value[0] = 0x0f;
+        value[1] = 0x27; // 9999
+        assert!(current_time::parse_cts(&value).is_some());
+        value[0] = 0x10;
+        value[1] = 0x27; // 10000
+        assert!(current_time::parse_cts(&value).is_none());
+
+        value[0] = 0x2e;
+        value[1] = 0x06; // 1582
+        value[7] = 7;
+        assert!(current_time::parse_cts(&value).is_some());
+        value[7] = 8;
+        assert!(current_time::parse_cts(&value).is_none());
+    }
+
+    #[test]
     fn battery_clear_covers_the_longest_text_at_its_baseline() {
         let pos = Point::new(display::BATTERY_POS_X, display::BATTERY_POS_Y);
         let style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
