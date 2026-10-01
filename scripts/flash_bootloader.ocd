@@ -1,5 +1,5 @@
 init
 
-program ../bootloader/bootloader-5.0.4.bin verify 0x00000000
+program bootloader/bootloader-1.0.1.bin verify 0x00000000
 
 reset

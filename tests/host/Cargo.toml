@@ -1,0 +1,11 @@
+[package]
+name = "kongle-host-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Match the firmware lockfile so these tests exercise the same implementations.
+chrono = { version = "=0.4.43", default-features = false }
+embedded-graphics = "=0.8.1"
+mipidsi = { version = "=0.8.0", default-features = false }

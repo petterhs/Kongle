@@ -9,6 +9,4 @@ set backtrace limit 32
 
 # Load binary
 load
-break main
 continue
-step
