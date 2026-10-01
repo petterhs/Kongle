@@ -62,7 +62,7 @@ Notes for agents and tools:
 
 ### MCUBoot bootloader (PineTime)
 
-With `--features mcuboot`, Kongle is linked at `0x00008200` (see `memory_mcuboot.x`) for the [PineTime MCUBoot bootloader](https://github.com/InfiniTimeOrg/pinetime-mcuboot-bootloader). Without that feature, it uses `memory_standalone.x` at address zero. Run `bash scripts/build-mcuboot-image.sh` or `bash scripts/flash_app.sh` **inside** `devenv shell`; devenv provides objcopy and imgtool. The bootloader starts a watchdog (~7 s) before jumping to the application; Kongle adopts and feeds it. Feeding the watchdog is separate from confirming a trial image. BLE DFU reception and image confirmation are not implemented yet.
+With `--features mcuboot`, Kongle is linked at `0x00008200` (see `memory_mcuboot.x`) for the [PineTime MCUBoot bootloader](https://github.com/InfiniTimeOrg/pinetime-mcuboot-bootloader). Without that feature, it uses `memory_standalone.x` at address zero. Run `bash scripts/build-mcuboot-image.sh` or `bash scripts/flash_app.sh` **inside** `devenv shell`; devenv provides objcopy and imgtool. The bootloader starts a 2-second watchdog before jumping to the application; Kongle adopts and feeds it every second. Feeding the watchdog is separate from confirming a trial image. BLE DFU reception and image confirmation are not implemented yet.
 
 ## Collaboration
 

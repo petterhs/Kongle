@@ -6,7 +6,6 @@ use embassy_futures::join::join;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, watch::Receiver,
 };
-use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 use trouble_host::prelude::DefaultPacketPool;
 use trouble_host::prelude::*;
@@ -88,6 +87,9 @@ pub async fn run<C>(
     };
 
     let mut time_rx = time_rx;
+    if let Some(t) = time_rx.try_changed() {
+        let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
+    }
     let _ = join(ble_task(runner), async {
         loop {
             match advertise("Kongle", &mut peripheral).await {
@@ -131,7 +133,7 @@ async fn gatt_events_and_time_sync_task<P: PacketPool>(
     set_time_tx: &Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
 ) {
     loop {
-        let disconnected = match embassy_futures::select::select(
+        match embassy_futures::select::select(
             async {
                 match conn.next().await {
                     GattConnectionEvent::Disconnected { reason } => {
@@ -172,22 +174,15 @@ async fn gatt_events_and_time_sync_task<P: PacketPool>(
                     _ => false,
                 }
             },
-            async {
-                Timer::after(Duration::from_millis(100)).await;
-                if let Some(t) = time_rx.try_changed() {
-                    let buf = encode_cts(&t);
-                    let _ = server.set(&server.current_time_service.current_time, &buf);
-                }
-                false
-            },
+            time_rx.changed(),
         )
         .await
         {
-            embassy_futures::select::Either::First(b)
-            | embassy_futures::select::Either::Second(b) => b,
-        };
-        if disconnected {
-            break;
+            embassy_futures::select::Either::First(true) => break,
+            embassy_futures::select::Either::First(false) => {}
+            embassy_futures::select::Either::Second(t) => {
+                let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
+            }
         }
     }
 }

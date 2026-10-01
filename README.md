@@ -81,7 +81,7 @@ Kongle can be run under the [Pinetime MCUBoot bootloader](https://github.com/Inf
   nc localhost 6969 | defmt-print -e target/mcuboot/thumbv7em-none-eabihf/release/kongle
   ```
 
-On reset, the MCUBoot bootloader should show its logo and then start Kongle. The bootloader starts a watchdog (~7 s) before running the application; Kongle feeds it automatically when it detects the bootloader has already started it.
+On reset, the MCUBoot bootloader should show its logo and then start Kongle. The bootloader starts a 2-second watchdog before running the application; Kongle feeds it every second when it detects the bootloader has already started it.
 
 This is a debugger-flashed development baseline. Kongle does not yet implement a BLE DFU receiver or confirm a trial image as permanent. Watchdog feeding does not confirm an update. Receiving and confirming Kongle-to-Kongle updates is the next milestone; the build script currently produces a BIN, not a Nordic DFU ZIP with an init packet.
 

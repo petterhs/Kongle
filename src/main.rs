@@ -118,9 +118,9 @@ async fn battery_task(
 ) {
     battery.calibrate().await;
     loop {
-        Timer::after(Duration::from_secs(10)).await;
         let state = battery.update().await;
         sender.send(state);
+        Timer::after(Duration::from_secs(10)).await;
     }
 }
 
@@ -138,11 +138,11 @@ async fn button_task(
     }
 }
 
-/// Feeds the MCUBoot bootloader's watchdog when it has already been started (~7 s timeout).
+/// Feeds the MCUBoot bootloader's watchdog when it has already been started (2 s timeout).
 /// A missed feed resets the MCU; an unconfirmed trial image can then be reverted.
 #[embassy_executor::task]
 async fn wdt_task_1(mut h0: embassy_nrf::wdt::WatchdogHandle) {
-    let mut ticker = Ticker::every(Duration::from_secs(3));
+    let mut ticker = Ticker::every(Duration::from_secs(1));
     loop {
         ticker.next().await;
         h0.pet();
@@ -323,55 +323,64 @@ async fn main(spawner: Spawner) {
     let mut last_battery: Option<BatteryState> = None;
     let mut brightness: u8 = 7;
     loop {
-        let time = time_rx.changed().await;
-        if last_time
-            .map(|t| t.hours != time.hours || t.minutes != time.minutes)
-            .unwrap_or(true)
+        match embassy_futures::select::select(
+            time_rx.changed(),
+            embassy_futures::select::select(battery_rx.changed(), button_rx.receive()),
+        )
+        .await
         {
-            time_bounds.into_styled(clear_style).draw(&mut display).ok();
-            let mut time_text: String<8> = String::new();
-            let _ = write!(&mut time_text, "{:02}:{:02}", time.hours, time.minutes);
-            let _ = Text::new(&time_text, time_pos, time_style).draw(&mut display);
-        }
-        if last_seconds != Some(time.seconds) {
-            seconds_bounds
-                .into_styled(clear_style)
-                .draw(&mut display)
-                .ok();
-            let mut seconds_text: String<2> = String::new();
-            let _ = write!(&mut seconds_text, "{:02}", time.seconds);
-            let _ = Text::new(&seconds_text, seconds_pos, seconds_style).draw(&mut display);
-            last_seconds = Some(time.seconds);
-        }
-        last_time = Some(time);
-
-        if let Some(battery_state) = battery_rx.try_changed() {
-            if last_battery != Some(battery_state) {
-                battery_bounds
-                    .into_styled(clear_style)
-                    .draw(&mut display)
-                    .ok();
-                let mut battery_text: String<16> = String::new();
-                let volts = battery_state.mv / 1000;
-                let frac = (battery_state.mv % 1000) / 10;
-                let charging = if battery_state.charging { "+" } else { "" };
-                let _ = write!(
-                    &mut battery_text,
-                    "{}.{:02}V{} {}%",
-                    volts, frac, charging, battery_state.percent
-                );
-                let _ = Text::new(&battery_text, battery_pos, battery_style).draw(&mut display);
-                last_battery = Some(battery_state);
+            embassy_futures::select::Either::First(time) => {
+                if last_time
+                    .map(|t| t.hours != time.hours || t.minutes != time.minutes)
+                    .unwrap_or(true)
+                {
+                    time_bounds.into_styled(clear_style).draw(&mut display).ok();
+                    let mut time_text: String<8> = String::new();
+                    let _ = write!(&mut time_text, "{:02}:{:02}", time.hours, time.minutes);
+                    let _ = Text::new(&time_text, time_pos, time_style).draw(&mut display);
+                }
+                if last_seconds != Some(time.seconds) {
+                    seconds_bounds
+                        .into_styled(clear_style)
+                        .draw(&mut display)
+                        .ok();
+                    let mut seconds_text: String<2> = String::new();
+                    let _ = write!(&mut seconds_text, "{:02}", time.seconds);
+                    let _ = Text::new(&seconds_text, seconds_pos, seconds_style).draw(&mut display);
+                    last_seconds = Some(time.seconds);
+                }
+                last_time = Some(time);
+            }
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::First(
+                battery_state,
+            )) => {
+                if last_battery != Some(battery_state) {
+                    battery_bounds
+                        .into_styled(clear_style)
+                        .draw(&mut display)
+                        .ok();
+                    let mut battery_text: String<16> = String::new();
+                    let volts = battery_state.mv / 1000;
+                    let frac = (battery_state.mv % 1000) / 10;
+                    let charging = if battery_state.charging { "+" } else { "" };
+                    let _ = write!(
+                        &mut battery_text,
+                        "{}.{:02}V{} {}%",
+                        volts, frac, charging, battery_state.percent
+                    );
+                    let _ = Text::new(&battery_text, battery_pos, battery_style).draw(&mut display);
+                    last_battery = Some(battery_state);
+                }
+            }
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                event,
+            )) => {
+                if matches!(event, InputEvent::ButtonPressed) {
+                    brightness = if brightness >= 7 { 1 } else { brightness + 1 };
+                    backlight.set(brightness);
+                }
             }
         }
-
-        while let Ok(event) = button_rx.try_receive() {
-            if matches!(event, InputEvent::ButtonPressed) {
-                brightness = if brightness >= 7 { 1 } else { brightness + 1 };
-                backlight.set(brightness);
-            }
-        }
-
         defmt::info!("heartbeat");
     }
 }
