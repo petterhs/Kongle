@@ -195,9 +195,11 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
         match self.phase {
             Phase::Sizes => {
                 let total = parse_application_size(data).ok_or(DfuError::InvalidImage)?;
+                defmt::info!("DFU application size: {} bytes", total);
                 self.total = total;
                 OTA_WATCH.sender().send(UpdateStatus::Erasing);
                 self.flash.erase_secondary().await?;
+                defmt::info!("DFU ready for init packet");
                 self.phase = Phase::InitStart;
                 Ok(Some(notification(&[0x10, 0x01, 0x01])))
             }

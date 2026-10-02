@@ -110,11 +110,22 @@ impl<SPI: SpiDevice<u8>> Flash<SPI> {
     pub async fn erase_secondary(&mut self) -> Result<(), FlashError> {
         // An old pending-image marker may still be present. Remove its sector
         // first so interruption cannot leave magic pointing to a partial image.
+        defmt::info!("DFU erase starting: {} sectors", SECONDARY_SECTORS);
+        let started = Instant::now();
         let trailer_sector = SLOT_END - 4096;
         for index in 0..SECONDARY_SECTORS {
             let address = erase_sector_address(index).ok_or(FlashError::OutOfBounds)?;
+            if index == 0 {
+                defmt::info!("DFU trailer erase: enabling writes");
+            }
             self.write_enable()?;
+            if index == 0 {
+                defmt::info!("DFU trailer erase: sending erase command");
+            }
             self.command(&Self::address_command(0x20, address))?;
+            if index == 0 {
+                defmt::info!("DFU trailer erase: waiting for flash");
+            }
             self.wait_ready(Duration::from_secs(3)).await?;
             if address == trailer_sector {
                 let mut magic = [0; 16];
@@ -123,7 +134,16 @@ impl<SPI: SpiDevice<u8>> Flash<SPI> {
                     return Err(FlashError::Verification);
                 }
             }
+            if index % 8 == 0 || index + 1 == SECONDARY_SECTORS {
+                defmt::info!(
+                    "DFU erase progress: {}/{} sectors, {} s",
+                    index + 1,
+                    SECONDARY_SECTORS,
+                    started.elapsed().as_secs()
+                );
+            }
         }
+        defmt::info!("DFU erase complete");
         Ok(())
     }
 
