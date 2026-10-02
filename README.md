@@ -75,7 +75,7 @@ Kongle can be run under the [Pinetime MCUBoot bootloader](https://github.com/Inf
 
   (Run without `sudo` so the build sees your devenv env; the script uses `sudo` only for OpenOCD.)
 
-  This builds the firmware with `--features mcuboot` (separate from the standalone build), wraps it as an **unsigned MCUBoot image** (header `0x200`, slot `0x74000`, version from `Cargo.toml`), and programs and verifies it at `0x00008000` via OpenOCD. To build without flashing, run `bash scripts/build-mcuboot-image.sh`. OpenOCD starts RTT and stays running; view defmt output in another terminal:
+  This builds the firmware with `--features mcuboot` (separate from the standalone build), wraps it as an **unsigned MCUBoot image** (header `0x200`, slot `0x74000`, version from `Cargo.toml`), and programs and verifies it at `0x00008000` via OpenOCD. To build without flashing, run `bash scripts/build-mcuboot-image.sh`. The flash script resets the watch and exits. For logs, run `bash scripts/debug.sh` in one terminal, then connect to RTT from another:
 
   ```bash
   nc localhost 6969 | defmt-print -e target/mcuboot/thumbv7em-none-eabihf/release/kongle
