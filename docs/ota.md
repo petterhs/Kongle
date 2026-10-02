@@ -46,6 +46,9 @@ before selecting the ZIP. Furu should finish the transfer, and Kongle should
 reset into the new image. The watch shows `Trial: reset reverts` while the
 image remains unconfirmed. A package built with `ota-staging` alone will still
 end in rejected validation (`opcode 0x04`, status `0x05`).
+If using `bash scripts/debug.sh` for RTT logs, start it **before** the OTA:
+the script issues `reset run` on startup, which would immediately revert a
+trial image if run afterward.
 
 Before trying a closed device or adding manual confirmation:
 
