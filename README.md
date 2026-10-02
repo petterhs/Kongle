@@ -52,6 +52,12 @@ Standalone firmware terminals:
   2. `cargo run --release`
   3. `nc localhost 6969 | defmt-print -e target/thumbv7em-none-eabihf/release/kongle`
 
+The small `B` at the top-right of the watch appears while a phone has an
+active GATT connection. RTT logs `[adv]` connection setup, `[gatt] disconnected`
+with the host's reason, and advertising restart. On a development board,
+capture RTT alongside Android logcat to distinguish link loss from a watch
+reset (`Kongle started` appears again). Closed watches have no RTT access.
+
 ## Two ways to run on dev kit with debugger
 
 - **Standalone (no bootloader)** – for rapid development: `cargo run --release` builds and flashes the firmware at `0x00000000`, replacing the bootloader if one is installed. Use this with the standalone debug workflow above.

@@ -82,6 +82,7 @@ impl TimeState {
 
 static TIME_WATCH: Watch<CriticalSectionRawMutex, TimeState, 2> = Watch::new();
 static BATTERY_WATCH: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
+static BLE_CONNECTED_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
 static BUTTON_CH: Channel<CriticalSectionRawMutex, InputEvent, 4> = Channel::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
 type FlashSpi = SharedSpiDevice<'static, NoopRawMutex, Spim<'static>, Output<'static>>;
@@ -204,7 +205,15 @@ async fn ble_peripheral_task(
     set_time_tx: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
     flash: flash::Flash<FlashSpi>,
 ) {
-    ble::run(controller, address, time_rx, set_time_tx, flash).await
+    ble::run(
+        controller,
+        address,
+        time_rx,
+        set_time_tx,
+        BLE_CONNECTED_WATCH.sender(),
+        flash,
+    )
+    .await
 }
 
 #[embassy_executor::main]
@@ -323,6 +332,7 @@ async fn main(spawner: Spawner) {
     let seconds_pos = Point::new(display_cfg::SECONDS_POS_X, display_cfg::SECONDS_POS_Y);
     let battery_pos = Point::new(display_cfg::BATTERY_POS_X, display_cfg::BATTERY_POS_Y);
     let update_pos = Point::new(display_cfg::UPDATE_POS_X, display_cfg::UPDATE_POS_Y);
+    let ble_pos = Point::new(display_cfg::BLE_POS_X, display_cfg::BLE_POS_Y);
     let time_bounds = display_cfg::text_bounds(time_font, display_cfg::TIME_CHARS, time_pos);
     let seconds_bounds =
         display_cfg::text_bounds(seconds_font, display_cfg::SECONDS_CHARS, seconds_pos);
@@ -330,6 +340,7 @@ async fn main(spawner: Spawner) {
         display_cfg::text_bounds(seconds_font, display_cfg::BATTERY_CHARS, battery_pos);
     let update_bounds =
         display_cfg::text_bounds(seconds_font, display_cfg::UPDATE_CHARS, update_pos);
+    let ble_bounds = display_cfg::text_bounds(seconds_font, 1, ble_pos);
     let clear_style = PrimitiveStyleBuilder::new()
         .fill_color(display_cfg::BACKGROUND_COLOR)
         .build();
@@ -387,6 +398,7 @@ async fn main(spawner: Spawner) {
     let mut time_rx = TIME_WATCH.receiver().unwrap();
     let mut battery_rx = BATTERY_WATCH.receiver().unwrap();
     let mut ota_rx = OTA_WATCH.receiver().unwrap();
+    let mut ble_rx = BLE_CONNECTED_WATCH.receiver().unwrap();
     let button_rx = BUTTON_CH.receiver();
 
     let mut last_time: Option<TimeState> = None;
@@ -398,7 +410,10 @@ async fn main(spawner: Spawner) {
             ota_rx.changed(),
             embassy_futures::select::select(
                 time_rx.changed(),
-                embassy_futures::select::select(battery_rx.changed(), button_rx.receive()),
+                embassy_futures::select::select(
+                    battery_rx.changed(),
+                    embassy_futures::select::select(button_rx.receive(), ble_rx.changed()),
+                ),
             ),
         )
         .await
@@ -481,7 +496,9 @@ async fn main(spawner: Spawner) {
                 }
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
-                embassy_futures::select::Either::Second(event),
+                embassy_futures::select::Either::Second(embassy_futures::select::Either::First(
+                    event,
+                )),
             )) => {
                 if matches!(event, InputEvent::ButtonPressed) {
                     brightness = (brightness + 1) % 8;
@@ -491,6 +508,16 @@ async fn main(spawner: Spawner) {
                 if matches!(event, InputEvent::ButtonHeld) {
                     defmt::info!("Long hold: restarting into MCUBoot button menu");
                     cortex_m::peripheral::SCB::sys_reset();
+                }
+            }
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                    connected,
+                )),
+            )) => {
+                ble_bounds.into_styled(clear_style).draw(&mut display).ok();
+                if connected {
+                    let _ = Text::new("B", ble_pos, battery_style).draw(&mut display);
                 }
             }
         }

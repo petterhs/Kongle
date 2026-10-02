@@ -27,6 +27,9 @@ pub const BATTERY_POS_X: i32 = 10;
 pub const BATTERY_POS_Y: i32 = 18;
 pub const BATTERY_CHARS: u32 = 11;
 
+pub const BLE_POS_X: i32 = 220;
+pub const BLE_POS_Y: i32 = 18;
+
 pub const UPDATE_POS_X: i32 = 10;
 pub const UPDATE_POS_Y: i32 = 226;
 pub const UPDATE_CHARS: u32 = 22;

@@ -4,7 +4,9 @@
 use chrono::NaiveDateTime;
 use embassy_futures::join::join;
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, watch::Receiver,
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    channel::Sender,
+    watch::{Receiver, Sender as WatchSender},
 };
 #[cfg(feature = "ota-activation")]
 use embassy_time::{Duration, Timer};
@@ -81,6 +83,7 @@ pub async fn run<C, S>(
     address: [u8; 6],
     time_rx: Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
+    connected_tx: WatchSender<'static, CriticalSectionRawMutex, bool, 2>,
     mut flash: Flash<S>,
 ) where
     C: Controller + 'static,
@@ -108,6 +111,7 @@ pub async fn run<C, S>(
     };
 
     let mut time_rx = time_rx;
+    connected_tx.send(false);
     if let Some(t) = time_rx.try_changed() {
         let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
     }
@@ -116,26 +120,32 @@ pub async fn run<C, S>(
             match advertise("Kongle", &mut peripheral).await {
                 Ok(advertiser) => {
                     defmt::info!("[adv] advertising");
-                    if let Ok(conn) = advertiser
-                        .accept()
-                        .await
-                        .and_then(|c| c.with_attribute_server(server))
-                    {
-                        defmt::info!("[adv] connection established");
-                        gatt_events_and_time_sync_task(
-                            server,
-                            &conn,
-                            &mut time_rx,
-                            &set_time_tx,
-                            &mut flash,
-                        )
-                        .await;
-                    } else {
-                        defmt::warn!("[adv] error while accepting/attaching GATT server");
+                    match advertiser.accept().await {
+                        Ok(raw_conn) => match raw_conn.with_attribute_server(server) {
+                            Ok(conn) => {
+                                defmt::info!("[adv] GATT connection established");
+                                connected_tx.send(true);
+                                gatt_events_and_time_sync_task(
+                                    server,
+                                    &conn,
+                                    &mut time_rx,
+                                    &set_time_tx,
+                                    &mut flash,
+                                )
+                                .await;
+                                connected_tx.send(false);
+                                defmt::info!("[adv] GATT connection closed; advertising again");
+                            }
+                            Err(e) => defmt::warn!("[adv] GATT attach failed: {:?}", e),
+                        },
+                        Err(e) => defmt::warn!("[adv] accept failed: {:?}", e),
                     }
                 }
-                Err(_e) => {
-                    defmt::warn!("[adv] error while starting advertising");
+                Err(BleHostError::BleHost(e)) => {
+                    defmt::warn!("[adv] host advertising error: {:?}", e)
+                }
+                Err(BleHostError::Controller(_)) => {
+                    defmt::warn!("[adv] controller advertising error")
                 }
             }
         }
@@ -146,8 +156,11 @@ pub async fn run<C, S>(
 /// Background task required by trouble-host: runs the BLE host stack.
 async fn ble_task<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, P>) {
     loop {
-        if runner.run().await.is_err() {
-            defmt::warn!("[ble_task] host error");
+        if let Err(e) = runner.run().await {
+            match e {
+                BleHostError::BleHost(error) => defmt::warn!("[ble_task] host error: {:?}", error),
+                BleHostError::Controller(_) => defmt::warn!("[ble_task] controller error"),
+            }
         }
     }
 }
