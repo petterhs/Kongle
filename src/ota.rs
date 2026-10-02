@@ -1,6 +1,6 @@
 //! Hardware-independent OTA status and MCUBoot secondary-slot layout.
 //!
-//! The receiver and external-flash driver stage images; activation is separate.
+//! The receiver and external-flash driver stage images for a trial boot.
 
 /// External SPI flash region used by the PineTime bootloader for the secondary image.
 pub const SECONDARY_SLOT_START: u32 = 0x0004_0000;
@@ -8,23 +8,26 @@ pub const SECONDARY_SLOT_SIZE: u32 = 0x0007_4000;
 pub const TRAILER_MAGIC_ADDRESS: u32 = SECONDARY_SLOT_START + SECONDARY_SLOT_SIZE - 16;
 
 /// MCUBoot image magic in the byte order written to SPI flash.
-/// A future receiver must write this only after verifying the complete staged image.
+/// Write this only after verifying the complete staged image.
 pub const TRAILER_MAGIC: [u8; 16] = [
     0x77, 0xc2, 0x95, 0xf3, 0x60, 0xd2, 0xef, 0x7f, 0x35, 0x52, 0x50, 0x0f, 0x2c, 0xb6, 0x79, 0x80,
 ];
 
-pub const MAX_IMAGE_SIZE: u32 = SECONDARY_SLOT_SIZE - TRAILER_MAGIC.len() as u32;
+// Keep the entire last 4 KiB sector for MCUBoot's swap-status trailer. Its
+// metadata occupies more than just the final 16-byte magic.
+pub const MAX_IMAGE_SIZE: u32 = SECONDARY_SLOT_SIZE - 4096;
 pub const SECONDARY_SECTORS: u32 = SECONDARY_SLOT_SIZE / 4096;
 
-/// Primary-slot trailer words for the pinned PineTime MCUBoot layout.
-pub const PRIMARY_COPY_DONE_ADDRESS: usize = 0x0007_bfe4;
+/// Primary-slot trailer flags for the pinned PineTime MCUBoot layout
+/// (8-byte trailer alignment; magic begins at 0x7bff0).
+pub const PRIMARY_COPY_DONE_ADDRESS: usize = 0x0007_bfe0;
 pub const PRIMARY_IMAGE_OK_ADDRESS: usize = 0x0007_bfe8;
 
 /// A freshly debugger-flashed primary has erased trailer words; a swapped
 /// trial has copy_done=1 but image_ok erased. Do not erase its rollback copy.
-pub fn primary_allows_staging(copy_done: u32, image_ok: u32) -> bool {
-    (copy_done == u32::MAX && image_ok == u32::MAX)
-        || ((copy_done == 1 || copy_done == u32::MAX) && image_ok == 1)
+pub fn primary_allows_staging(copy_done: u8, image_ok: u8) -> bool {
+    (copy_done == 0xff && image_ok == 0xff)
+        || ((copy_done == 1 || copy_done == 0xff) && image_ok == 1)
 }
 
 /// Erase the trailer sector first so an interrupted update cannot leave a
@@ -89,9 +92,11 @@ pub fn crc16_update(mut crc: u16, data: &[u8]) -> u16 {
     crc
 }
 
-/// Evidence a future receiver must collect from a full readback of the staged
+/// Evidence the receiver must collect from a full readback of the staged
 /// image before it can ask MCUBoot to try the secondary slot.
-pub struct ActivationPlan;
+pub struct ActivationPlan {
+    _verified: (),
+}
 
 impl ActivationPlan {
     pub fn from_readback(
@@ -115,27 +120,13 @@ impl ActivationPlan {
         {
             return None;
         }
-        Some(Self)
+        Some(Self { _verified: () })
     }
 
-    /// Deliberately has no call site or SPI implementation yet. This is the
-    /// only operation that would make a staged image bootable.
     #[cfg(feature = "ota-activation")]
-    pub fn mark_pending(self, flash: &mut impl SecondarySlotFlash) -> Result<(), ()> {
-        flash.write(TRAILER_MAGIC_ADDRESS, &TRAILER_MAGIC)?;
-        let mut readback = [0; 16];
-        flash.read(TRAILER_MAGIC_ADDRESS, &mut readback)?;
-        if readback != TRAILER_MAGIC {
-            return Err(());
-        }
-        Ok(())
+    pub fn trial_marker(self) -> (u32, [u8; 16]) {
+        (TRAILER_MAGIC_ADDRESS, TRAILER_MAGIC)
     }
-}
-
-#[cfg(feature = "ota-activation")]
-pub trait SecondarySlotFlash {
-    fn write(&mut self, address: u32, data: &[u8]) -> Result<(), ()>;
-    fn read(&mut self, address: u32, data: &mut [u8]) -> Result<(), ()>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +137,7 @@ pub enum UpdateStatus {
     Validating,
     Staged,
     ReadyToRestart,
+    Trial,
     Failed,
 }
 

@@ -98,17 +98,16 @@ Kongle can be run under the [Pinetime MCUBoot bootloader](https://github.com/Inf
 
 On reset, the MCUBoot bootloader should show its logo and then start Kongle. Kongle feeds the bootloader's hardware watchdog every second if it finds one already running. A log saying the watchdog is not running does not, by itself, establish whether MCUBoot ran.
 
-This is a debugger-flashed development baseline. With the opt-in `ota-staging`
-feature, Kongle can receive and verify a Nordic legacy DFU image in external
-flash, but it deliberately does not activate that image or confirm a trial boot.
-Watchdog feeding does not confirm an update. Use
-`scripts/build-dfu-package.sh` to create a local test ZIP; ordinary builds do
-not enable staging.
+This is a debugger-flashed development baseline. With `ota-staging`, Kongle
+receives and verifies an image but rejects final activation. For a dev-board
+trial boot, use `KONGLE_FEATURES=mcuboot,ota-activation` for both flashing the
+baseline and `scripts/build-dfu-package.sh`. Activation requests an MCUBoot
+test swap; Kongle does not confirm the new image, so resetting should revert.
+Keep this feature on the ST-Link board until rollback has been tested.
 
 The [OTA development sequence](docs/ota.md) describes the opt-in BLE staging
-receiver, watch progress UI, long-hold restart, and the gated activation code.
-Staging deliberately stops before installation; Kongle-to-Kongle OTA is not yet
-complete.
+receiver, watch progress UI, long-hold restart, and trial activation. Manual
+confirmation is still to be implemented after rollback testing.
 
 ## Contributing
 

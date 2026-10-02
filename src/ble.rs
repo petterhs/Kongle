@@ -6,6 +6,8 @@ use embassy_futures::join::join;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, watch::Receiver,
 };
+#[cfg(feature = "ota-activation")]
+use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 use trouble_host::prelude::DefaultPacketPool;
 use trouble_host::prelude::*;
@@ -259,6 +261,13 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                                     defmt::info!("DFU receipt notification queued");
                                 }
                             }
+                        }
+                        #[cfg(feature = "ota-activation")]
+                        if dfu.activation_requested() {
+                            // Opcode 5 has no DFU notification. Allow the ATT
+                            // write and Android's callback to settle first.
+                            Timer::after(Duration::from_millis(500)).await;
+                            cortex_m::peripheral::SCB::sys_reset();
                         }
                     }
                     _ => {}

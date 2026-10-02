@@ -3,14 +3,16 @@
 use embassy_time::{Duration, Instant, Timer};
 use embedded_hal::spi::{Operation, SpiDevice};
 
+#[cfg(feature = "ota-activation")]
+use crate::ota::ActivationPlan;
 use crate::ota::{
     erase_sector_address, image_range_ok, SECONDARY_SECTORS, SECONDARY_SLOT_SIZE,
-    SECONDARY_SLOT_START, TRAILER_MAGIC,
+    SECONDARY_SLOT_START,
 };
 
 const PAGE_SIZE: u32 = 256;
 const SLOT_END: u32 = SECONDARY_SLOT_START + SECONDARY_SLOT_SIZE;
-const IMAGE_END: u32 = SLOT_END - TRAILER_MAGIC.len() as u32;
+const IMAGE_END: u32 = SECONDARY_SLOT_START + crate::ota::MAX_IMAGE_SIZE;
 
 #[derive(Clone, Copy, Debug, defmt::Format)]
 pub enum FlashError {
@@ -175,6 +177,31 @@ impl<SPI: SpiDevice<u8>> Flash<SPI> {
                 return Err(FlashError::Verification);
             }
             offset += size;
+        }
+        Ok(())
+    }
+
+    /// Request a test swap only. Never set the secondary image_ok flag.
+    #[cfg(feature = "ota-activation")]
+    pub async fn mark_trial_pending(&mut self, plan: ActivationPlan) -> Result<(), FlashError> {
+        let (address, magic) = plan.trial_marker();
+        let mut before = [0; 16];
+        self.read(address, &mut before)?;
+        if before != [0xff; 16] {
+            return Err(FlashError::Verification);
+        }
+        self.write_enable()?;
+        self.spi
+            .transaction(&mut [
+                Operation::Write(&Self::address_command(0x02, address)),
+                Operation::Write(&magic),
+            ])
+            .map_err(|_| FlashError::Bus)?;
+        self.wait_ready(Duration::from_millis(100)).await?;
+        let mut after = [0; 16];
+        self.read(address, &mut after)?;
+        if after != magic {
+            return Err(FlashError::Verification);
         }
         Ok(())
     }

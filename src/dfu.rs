@@ -1,5 +1,5 @@
 //! Nordic legacy application DFU receiver used by Furu and InfiniTime.
-//! Transfer and readback are supported; installing the staged image is disabled.
+//! Transfer and readback are supported; trial activation is feature-gated.
 
 use embassy_time::{Duration, Timer};
 use embedded_hal::spi::SpiDevice;
@@ -26,6 +26,7 @@ enum Phase {
     Receiving,
     Received,
     Staged,
+    Activating,
     Failed,
 }
 
@@ -61,6 +62,8 @@ pub struct Receiver<'a, S> {
     packet_count: u32,
     prn: u16,
     last_percent: Option<u8>,
+    #[cfg(feature = "ota-activation")]
+    plan: Option<ActivationPlan>,
 }
 
 impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
@@ -74,6 +77,8 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
             packet_count: 0,
             prn: 0,
             last_percent: None,
+            #[cfg(feature = "ota-activation")]
+            plan: None,
         }
     }
 
@@ -90,9 +95,14 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
         OTA_WATCH.sender().send(UpdateStatus::Failed);
     }
 
+    #[cfg(feature = "ota-activation")]
+    pub fn activation_requested(&self) -> bool {
+        self.phase == Phase::Activating
+    }
+
     pub fn on_disconnect(&mut self) {
         match self.phase {
-            Phase::Idle | Phase::Failed | Phase::Staged => {}
+            Phase::Idle | Phase::Failed | Phase::Staged | Phase::Activating => {}
             _ => self.fail(),
         }
     }
@@ -107,12 +117,12 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
                 // The secondary slot is also MCUBoot's rollback copy after a
                 // trial swap. Do not erase it until that image is confirmed.
                 let copy_done =
-                    unsafe { core::ptr::read_volatile(PRIMARY_COPY_DONE_ADDRESS as *const u32) };
+                    unsafe { core::ptr::read_volatile(PRIMARY_COPY_DONE_ADDRESS as *const u8) };
                 let image_ok =
-                    unsafe { core::ptr::read_volatile(PRIMARY_IMAGE_OK_ADDRESS as *const u32) };
+                    unsafe { core::ptr::read_volatile(PRIMARY_IMAGE_OK_ADDRESS as *const u8) };
                 if !primary_allows_staging(copy_done, image_ok) {
                     defmt::warn!(
-                        "DFU primary image is an unconfirmed trial: copy_done={:08x} image_ok={:08x}",
+                        "DFU primary image cannot safely stage: copy_done={:02x} image_ok={:02x}",
                         copy_done,
                         image_ok
                     );
@@ -125,6 +135,10 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
                 self.packet_count = 0;
                 self.prn = 0;
                 self.last_percent = None;
+                #[cfg(feature = "ota-activation")]
+                {
+                    self.plan = None;
+                }
                 Ok(None)
             }
             [0x02, 0x00] if self.phase == Phase::InitStart => {
@@ -168,26 +182,44 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
                     offset += size as u32;
                     Timer::after(Duration::from_millis(1)).await;
                 }
-                if ActivationPlan::from_readback(
+                let Some(plan) = ActivationPlan::from_readback(
                     self.received,
                     self.total,
                     self.expected_crc,
                     crc,
                     &header,
-                )
-                .is_none()
-                {
+                ) else {
                     self.fail();
                     return Ok(Some(failure_response(0x04)));
-                }
+                };
                 self.phase = Phase::Staged;
                 OTA_WATCH.sender().send(UpdateStatus::Staged);
-                // A successful validation response would make Furu send opcode 5
-                // and report success. Do not claim success until activation has
-                // been wired and tested on the development board.
-                Ok(Some(failure_response(0x04)))
+                #[cfg(feature = "ota-activation")]
+                {
+                    self.plan = Some(plan);
+                    Ok(Some(notification(&[0x10, 0x04, 0x01])))
+                }
+                #[cfg(not(feature = "ota-activation"))]
+                {
+                    let _ = plan;
+                    Ok(Some(failure_response(0x04)))
+                }
             }
-            [0x05] if self.phase == Phase::Staged => Err(DfuError::ActivationDisabled),
+            [0x05] if self.phase == Phase::Staged => {
+                #[cfg(feature = "ota-activation")]
+                {
+                    let plan = self.plan.take().ok_or(DfuError::Protocol)?;
+                    self.flash.mark_trial_pending(plan).await?;
+                    defmt::info!("DFU trial marker verified; restarting into MCUBoot");
+                    self.phase = Phase::Activating;
+                    OTA_WATCH.sender().send(UpdateStatus::ReadyToRestart);
+                    Ok(None)
+                }
+                #[cfg(not(feature = "ota-activation"))]
+                {
+                    Err(DfuError::ActivationDisabled)
+                }
+            }
             _ => Err(DfuError::Protocol),
         }
     }

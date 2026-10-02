@@ -64,8 +64,7 @@ baremetal = []
 mcuboot = []
 # Opt-in development-board receiver. Default builds never erase external flash.
 ota-staging = ["mcuboot"]
-# Compiles the pending-image trailer writer. No production call site or SPI
-# implementation exists yet; enabling this alone cannot activate an image.
+# Development-board-only trial boot. Leaves image_ok erased so reset reverts.
 ota-activation = ["ota-staging"]
 
 [workspace]

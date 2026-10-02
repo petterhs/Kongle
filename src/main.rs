@@ -354,7 +354,15 @@ async fn main(spawner: Spawner) {
     let low = embassy_nrf::pac::FICR.deviceaddr(0).read().to_le_bytes();
     let high = embassy_nrf::pac::FICR.deviceaddr(1).read().to_le_bytes();
     let address = [low[0], low[1], low[2], low[3], high[0], high[1] | 0xc0];
-    OTA_WATCH.sender().send(UpdateStatus::Idle);
+    let copy_done =
+        unsafe { core::ptr::read_volatile(ota::PRIMARY_COPY_DONE_ADDRESS as *const u8) };
+    let image_ok = unsafe { core::ptr::read_volatile(ota::PRIMARY_IMAGE_OK_ADDRESS as *const u8) };
+    if copy_done == 1 && image_ok == 0xff {
+        defmt::warn!("Running unconfirmed trial firmware; next reset reverts");
+        OTA_WATCH.sender().send(UpdateStatus::Trial);
+    } else {
+        OTA_WATCH.sender().send(UpdateStatus::Idle);
+    }
     spawner
         .spawn(ble_peripheral_task(
             controller,
@@ -408,6 +416,9 @@ async fn main(spawner: Spawner) {
                     }
                     UpdateStatus::ReadyToRestart => {
                         let _ = text.push_str("Update ready");
+                    }
+                    UpdateStatus::Trial => {
+                        let _ = text.push_str("Trial: reset reverts");
                     }
                     UpdateStatus::Failed => {
                         let _ = text.push_str("Update failed");

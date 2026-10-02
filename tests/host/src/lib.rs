@@ -169,12 +169,12 @@ mod tests {
 
     #[test]
     fn unconfirmed_trial_cannot_erase_rollback_slot() {
-        assert_eq!(ota::PRIMARY_COPY_DONE_ADDRESS, 0x7bfe4);
+        assert_eq!(ota::PRIMARY_COPY_DONE_ADDRESS, 0x7bfe0);
         assert_eq!(ota::PRIMARY_IMAGE_OK_ADDRESS, 0x7bfe8);
-        assert!(ota::primary_allows_staging(u32::MAX, u32::MAX));
+        assert!(ota::primary_allows_staging(0xff, 0xff));
         assert!(ota::primary_allows_staging(1, 1));
-        assert!(!ota::primary_allows_staging(1, u32::MAX));
-        assert!(!ota::primary_allows_staging(0, u32::MAX));
+        assert!(!ota::primary_allows_staging(1, 0xff));
+        assert!(!ota::primary_allows_staging(0, 0xff));
         assert!(!ota::primary_allows_staging(0, 1));
     }
 
@@ -221,40 +221,15 @@ mod tests {
 
     #[cfg(feature = "ota-activation")]
     #[test]
-    fn activation_writes_only_trailer_magic_and_checks_readback() {
-        struct Flash {
-            written: Option<(u32, Vec<u8>)>,
-            corrupt_readback: bool,
-        }
-        impl ota::SecondarySlotFlash for Flash {
-            fn write(&mut self, address: u32, data: &[u8]) -> Result<(), ()> {
-                self.written = Some((address, data.to_vec()));
-                Ok(())
-            }
-            fn read(&mut self, _address: u32, data: &mut [u8]) -> Result<(), ()> {
-                data.copy_from_slice(&ota::TRAILER_MAGIC);
-                if self.corrupt_readback {
-                    data[0] ^= 1;
-                }
-                Ok(())
-            }
-        }
+    fn verified_image_requests_only_a_trial_marker() {
         let mut header = [0; 16];
         header[..4].copy_from_slice(&[0x3d, 0xb8, 0xf3, 0x96]);
         header[8..10].copy_from_slice(&0x200u16.to_le_bytes());
         header[12..16].copy_from_slice(&0x3e00u32.to_le_bytes());
         let plan = ota::ActivationPlan::from_readback(0x4000, 0x4000, 1, 1, &header).unwrap();
-        let mut flash = Flash {
-            written: None,
-            corrupt_readback: false,
-        };
-        assert!(plan.mark_pending(&mut flash).is_ok());
         assert_eq!(
-            flash.written,
-            Some((ota::TRAILER_MAGIC_ADDRESS, ota::TRAILER_MAGIC.to_vec()))
+            plan.trial_marker(),
+            (ota::TRAILER_MAGIC_ADDRESS, ota::TRAILER_MAGIC)
         );
-        let plan = ota::ActivationPlan::from_readback(0x4000, 0x4000, 1, 1, &header).unwrap();
-        flash.corrupt_readback = true;
-        assert!(plan.mark_pending(&mut flash).is_err());
     }
 }
