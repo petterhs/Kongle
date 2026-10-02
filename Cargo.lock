@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "apache-nimble"
 version = "0.1.0"
-source = "git+https://github.com/petterhs/apache-nimble-sys.git?rev=9395fad7061a831a7ec6c0f301847a9c4d67edd5#9395fad7061a831a7ec6c0f301847a9c4d67edd5"
+source = "git+https://github.com/petterhs/apache-nimble-sys.git?rev=9c872c2f215ea34ade985802bfce098583e958f1#9c872c2f215ea34ade985802bfce098583e958f1"
 dependencies = [
  "apache-nimble-sys",
  "bindgen",
@@ -32,7 +32,7 @@ dependencies = [
 [[package]]
 name = "apache-nimble-sys"
 version = "0.0.1"
-source = "git+https://github.com/petterhs/apache-nimble-sys.git?rev=9395fad7061a831a7ec6c0f301847a9c4d67edd5#9395fad7061a831a7ec6c0f301847a9c4d67edd5"
+source = "git+https://github.com/petterhs/apache-nimble-sys.git?rev=9c872c2f215ea34ade985802bfce098583e958f1#9c872c2f215ea34ade985802bfce098583e958f1"
 dependencies = [
  "bindgen",
  "cbindgen",

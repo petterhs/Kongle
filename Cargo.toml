@@ -73,9 +73,9 @@ members = ["tests/host"]
 resolver = "2"
 
 [patch.crates-io]
-# Return copied HCI event buffers to NimBLE; otherwise DFU notifications stall
-# when the controller exhausts its event pool. See petterhs/apache-nimble-sys#1.
-apache-nimble = { git = "https://github.com/petterhs/apache-nimble-sys.git", rev = "9395fad7061a831a7ec6c0f301847a9c4d67edd5" }
+# Return copied HCI event buffers and buffer incoming ACL bursts during DFU.
+# See petterhs/apache-nimble-sys#1.
+apache-nimble = { git = "https://github.com/petterhs/apache-nimble-sys.git", rev = "9c872c2f215ea34ade985802bfce098583e958f1" }
 
 [profile.release]
 debug = 2
