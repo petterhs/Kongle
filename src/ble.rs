@@ -240,6 +240,13 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                         }
                         if let Some(reply) = dfu_reply {
                             if let Ok(payload) = heapless09::Vec::<u8, 20>::from_slice(&reply) {
+                                let trace_receipt = reply.len() == 5
+                                    && reply[0] == 0x11
+                                    && u32::from_le_bytes([reply[1], reply[2], reply[3], reply[4]])
+                                        <= 2_000;
+                                if trace_receipt {
+                                    defmt::info!("DFU queuing receipt notification");
+                                }
                                 if server
                                     .dfu_service
                                     .control_point
@@ -248,6 +255,8 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                                     .is_err()
                                 {
                                     defmt::warn!("[dfu] failed to notify control point");
+                                } else if trace_receipt {
+                                    defmt::info!("DFU receipt notification queued");
                                 }
                             }
                         }
