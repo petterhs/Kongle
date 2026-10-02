@@ -1,5 +1,7 @@
 init
+reset init
 
 program bootloader/bootloader-1.0.1.bin verify 0x00000000
 
-reset
+reset run
+shutdown

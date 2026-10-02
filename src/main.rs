@@ -4,33 +4,40 @@
 mod ble;
 mod current_time;
 mod device;
+mod dfu;
+mod flash;
 mod fonts;
+mod ota;
 
+use core::cell::RefCell;
 use core::fmt::Write;
 use defmt_rtt as _;
+use embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice as SharedSpiDevice;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::Priority;
 use embassy_nrf::saadc;
 use embassy_nrf::spim::{Config as SpimConfig, Frequency, Spim, MODE_3};
+use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_graphics::{
     mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
     prelude::*,
     primitives::PrimitiveStyleBuilder,
     text::Text,
 };
-use embedded_hal_bus::spi::ExclusiveDevice;
 use heapless::String;
 use mipidsi::{models::ST7789, Builder};
 use panic_probe as _;
+use static_cell::StaticCell;
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use device::battery::BatteryState;
 use device::display as display_cfg;
 use device::input::InputEvent;
 use fonts::JETBRAINS_FONT_54_POINT_EXTRA_BOLD;
+use ota::UpdateStatus;
 
 embassy_nrf::bind_interrupts!(struct Irqs {
     TWISPI0 => embassy_nrf::spim::InterruptHandler<embassy_nrf::peripherals::TWISPI0>;
@@ -75,7 +82,12 @@ impl TimeState {
 
 static TIME_WATCH: Watch<CriticalSectionRawMutex, TimeState, 2> = Watch::new();
 static BATTERY_WATCH: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
+static BLE_CONNECTED_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
 static BUTTON_CH: Channel<CriticalSectionRawMutex, InputEvent, 4> = Channel::new();
+static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
+type FlashSpi = SharedSpiDevice<'static, NoopRawMutex, Spim<'static>, Output<'static>>;
+/// The future BLE receiver publishes progress here; the display owns the view.
+pub(crate) static OTA_WATCH: Watch<CriticalSectionRawMutex, UpdateStatus, 2> = Watch::new();
 /// Channel for BLE to send new date/time; clock_task applies it.
 pub(crate) static SET_TIME_CH: Channel<CriticalSectionRawMutex, NaiveDateTime, 1> = Channel::new();
 
@@ -129,9 +141,40 @@ async fn button_task(
     mut button: device::input::Button<'static>,
     sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, InputEvent, 4>,
 ) {
+    let mut pressed_since = None;
+    let mut held_sent = false;
+    // A stuck or deliberately held button at startup must not reset the app
+    // again before the bootloader's button menu can be used. Arm only after a
+    // release, then require a fresh press for a long hold.
+    let mut armed = !button.is_pressed();
     loop {
         if let Some(event) = button.poll() {
-            sender.send(event).await;
+            if !armed {
+                if matches!(event, InputEvent::ButtonReleased) {
+                    armed = true;
+                }
+            } else {
+                match event {
+                    InputEvent::ButtonPressed => {
+                        pressed_since = Some(Instant::now());
+                        held_sent = false;
+                    }
+                    InputEvent::ButtonReleased => {
+                        pressed_since = None;
+                        held_sent = false;
+                    }
+                    _ => {}
+                }
+                sender.send(event).await;
+            }
+        }
+        if !held_sent
+            && pressed_since
+                .map(|start| start.elapsed() >= Duration::from_secs(3))
+                .unwrap_or(false)
+        {
+            held_sent = true;
+            sender.send(InputEvent::ButtonHeld).await;
         }
         // Six samples at 10 ms intervals provide debounce without a busy loop.
         Timer::after(Duration::from_millis(10)).await;
@@ -160,8 +203,17 @@ async fn ble_peripheral_task(
     address: [u8; 6],
     time_rx: embassy_sync::watch::Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
+    flash: flash::Flash<FlashSpi>,
 ) {
-    ble::run(controller, address, time_rx, set_time_tx).await
+    ble::run(
+        controller,
+        address,
+        time_rx,
+        set_time_tx,
+        BLE_CONNECTED_WATCH.sender(),
+        flash,
+    )
+    .await
 }
 
 #[embassy_executor::main]
@@ -173,8 +225,8 @@ async fn main(spawner: Spawner) {
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
 
-    // When running under the MCUBoot bootloader, it starts the WDT before jumping here.
-    // Adopt it before BLE initialization and its startup delay. This does not confirm a trial image.
+    // Adopt an already-running watchdog before BLE initialization and its
+    // startup delay. This does not confirm a trial image.
     if let Some(wdt_config) = embassy_nrf::wdt::Config::try_new(&p.WDT) {
         defmt::info!(
             "WDT is running (bootloader started it); timeout_ticks={}",
@@ -187,7 +239,7 @@ async fn main(spawner: Spawner) {
             defmt::warn!("WDT config/handle count mismatch; watchdog may timeout (bootloader may use >1 handle)");
         }
     } else {
-        defmt::info!("WDT not running (standalone mode)");
+        defmt::info!("WDT not running; no watchdog to adopt");
     }
 
     apache_nimble::initialize_nimble();
@@ -219,14 +271,18 @@ async fn main(spawner: Spawner) {
     let mut spim_config = SpimConfig::default();
     spim_config.mode = MODE_3;
     spim_config.frequency = Frequency::M8;
-    let spim = Spim::new_txonly(
+    let spim = Spim::new(
         p.TWISPI0,
         Irqs,
         p.P0_02, // SCK
+        p.P0_04, // MISO from external flash
         p.P0_03, // MOSI
         spim_config,
     );
-    let spi_dev = ExclusiveDevice::new_no_delay(spim, cs).unwrap();
+    let spi_bus = SPI_BUS.init(BlockingMutex::new(RefCell::new(spim)));
+    let spi_dev = SharedSpiDevice::new(spi_bus, cs);
+    let flash_cs = Output::new(p.P0_05, Level::High, OutputDrive::Standard);
+    let flash = flash::Flash::new(SharedSpiDevice::new(spi_bus, flash_cs));
     let di = display_interface_spi::SPIInterface::new(spi_dev, dc);
 
     // Create a simple blocking delay instead of embassy_time::Delay
@@ -270,15 +326,21 @@ async fn main(spawner: Spawner) {
         .text_color(display_cfg::TEXT_COLOR)
         .background_color(display_cfg::BACKGROUND_COLOR)
         .build();
+    let update_style = battery_style;
 
     let time_pos = Point::new(display_cfg::TIME_POS_X, display_cfg::TIME_POS_Y);
     let seconds_pos = Point::new(display_cfg::SECONDS_POS_X, display_cfg::SECONDS_POS_Y);
     let battery_pos = Point::new(display_cfg::BATTERY_POS_X, display_cfg::BATTERY_POS_Y);
+    let update_pos = Point::new(display_cfg::UPDATE_POS_X, display_cfg::UPDATE_POS_Y);
+    let ble_pos = Point::new(display_cfg::BLE_POS_X, display_cfg::BLE_POS_Y);
     let time_bounds = display_cfg::text_bounds(time_font, display_cfg::TIME_CHARS, time_pos);
     let seconds_bounds =
         display_cfg::text_bounds(seconds_font, display_cfg::SECONDS_CHARS, seconds_pos);
     let battery_bounds =
         display_cfg::text_bounds(seconds_font, display_cfg::BATTERY_CHARS, battery_pos);
+    let update_bounds =
+        display_cfg::text_bounds(seconds_font, display_cfg::UPDATE_CHARS, update_pos);
+    let ble_bounds = display_cfg::text_bounds(seconds_font, 1, ble_pos);
     let clear_style = PrimitiveStyleBuilder::new()
         .fill_color(display_cfg::BACKGROUND_COLOR)
         .build();
@@ -299,16 +361,35 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     let time_rx_ble = TIME_WATCH.receiver().unwrap();
-    // Factory-programmed device address, in Bluetooth little-endian byte order.
+    // Derive a stable static-random address distinct from InfiniTime's FICR
+    // address. Android caches GATT services by address; switching firmware
+    // without changing it can leave InfiniTime's handles mapped to Kongle.
     let low = embassy_nrf::pac::FICR.deviceaddr(0).read().to_le_bytes();
     let high = embassy_nrf::pac::FICR.deviceaddr(1).read().to_le_bytes();
-    let address = [low[0], low[1], low[2], low[3], high[0], high[1] | 0xc0];
+    let address = [
+        low[0] ^ 0x80,
+        low[1],
+        low[2],
+        low[3],
+        high[0],
+        high[1] | 0xc0,
+    ];
+    let copy_done =
+        unsafe { core::ptr::read_volatile(ota::PRIMARY_COPY_DONE_ADDRESS as *const u8) };
+    let image_ok = unsafe { core::ptr::read_volatile(ota::PRIMARY_IMAGE_OK_ADDRESS as *const u8) };
+    if copy_done == 1 && image_ok == 0xff {
+        defmt::warn!("Running unconfirmed trial firmware; next reset reverts");
+        OTA_WATCH.sender().send(UpdateStatus::Trial);
+    } else {
+        OTA_WATCH.sender().send(UpdateStatus::Idle);
+    }
     spawner
         .spawn(ble_peripheral_task(
             controller,
             address,
             time_rx_ble,
             SET_TIME_CH.sender(),
+            flash,
         ))
         .unwrap();
 
@@ -316,6 +397,8 @@ async fn main(spawner: Spawner) {
 
     let mut time_rx = TIME_WATCH.receiver().unwrap();
     let mut battery_rx = BATTERY_WATCH.receiver().unwrap();
+    let mut ota_rx = OTA_WATCH.receiver().unwrap();
+    let mut ble_rx = BLE_CONNECTED_WATCH.receiver().unwrap();
     let button_rx = BUTTON_CH.receiver();
 
     let mut last_time: Option<TimeState> = None;
@@ -324,12 +407,52 @@ async fn main(spawner: Spawner) {
     let mut brightness: u8 = 7;
     loop {
         match embassy_futures::select::select(
-            time_rx.changed(),
-            embassy_futures::select::select(battery_rx.changed(), button_rx.receive()),
+            ota_rx.changed(),
+            embassy_futures::select::select(
+                time_rx.changed(),
+                embassy_futures::select::select(
+                    battery_rx.changed(),
+                    embassy_futures::select::select(button_rx.receive(), ble_rx.changed()),
+                ),
+            ),
         )
         .await
         {
-            embassy_futures::select::Either::First(time) => {
+            embassy_futures::select::Either::First(status) => {
+                update_bounds
+                    .into_styled(clear_style)
+                    .draw(&mut display)
+                    .ok();
+                let mut text: String<22> = String::new();
+                match status {
+                    UpdateStatus::Idle => {}
+                    UpdateStatus::Erasing => {
+                        let _ = text.push_str("Preparing update");
+                    }
+                    UpdateStatus::Receiving { .. } => {
+                        let _ = write!(&mut text, "Update {}%", status.percent().unwrap_or(0));
+                    }
+                    UpdateStatus::Validating => {
+                        let _ = text.push_str("Verifying update");
+                    }
+                    UpdateStatus::Staged => {
+                        let _ = text.push_str("Update staged");
+                    }
+                    UpdateStatus::ReadyToRestart => {
+                        let _ = text.push_str("Update ready");
+                    }
+                    UpdateStatus::Trial => {
+                        let _ = text.push_str("Trial: reset reverts");
+                    }
+                    UpdateStatus::Failed => {
+                        let _ = text.push_str("Update failed");
+                    }
+                }
+                let _ = Text::new(&text, update_pos, update_style).draw(&mut display);
+            }
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::First(
+                time,
+            )) => {
                 if last_time
                     .map(|t| t.hours != time.hours || t.minutes != time.minutes)
                     .unwrap_or(true)
@@ -351,8 +474,8 @@ async fn main(spawner: Spawner) {
                 }
                 last_time = Some(time);
             }
-            embassy_futures::select::Either::Second(embassy_futures::select::Either::First(
-                battery_state,
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                embassy_futures::select::Either::First(battery_state),
             )) => {
                 if last_battery != Some(battery_state) {
                     battery_bounds
@@ -373,11 +496,28 @@ async fn main(spawner: Spawner) {
                 }
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
-                event,
+                embassy_futures::select::Either::Second(embassy_futures::select::Either::First(
+                    event,
+                )),
             )) => {
                 if matches!(event, InputEvent::ButtonPressed) {
                     brightness = (brightness + 1) % 8;
                     backlight.set(brightness);
+                }
+                #[cfg(feature = "mcuboot")]
+                if matches!(event, InputEvent::ButtonHeld) {
+                    defmt::info!("Long hold: restarting into MCUBoot button menu");
+                    cortex_m::peripheral::SCB::sys_reset();
+                }
+            }
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                    connected,
+                )),
+            )) => {
+                ble_bounds.into_styled(clear_style).draw(&mut display).ok();
+                if connected {
+                    let _ = Text::new("B", ble_pos, battery_style).draw(&mut display);
                 }
             }
         }

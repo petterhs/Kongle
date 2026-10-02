@@ -8,6 +8,7 @@ use embassy_time::{Duration, Timer};
 pub enum InputEvent {
     ButtonPressed,
     ButtonReleased,
+    ButtonHeld,
     TouchDetected,
 }
 
