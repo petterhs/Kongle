@@ -45,7 +45,7 @@ Enter `devenv shell`; it provides the pinned `defmt-print` RTT decoder and its
 runtime libraries through Nix. Run the scripts below without sudo;
 they resolve OpenOCD from devenv before using sudo for hardware access.
 
-Terminals:
+Standalone firmware terminals:
 
   1. `bash scripts/debug.sh` (uses sudo only for OpenOCD)
   2. `cargo run --release`
@@ -55,6 +55,10 @@ Terminals:
 
 - **Standalone (no bootloader)** – for rapid development: `cargo run --release` builds and flashes the firmware at `0x00000000`. Use this with the debug workflow above.
 - **With MCUBoot bootloader** – for testing with the bootloader use `scripts/flash_app.sh`, which builds with `--features mcuboot` (FLASH at `0x08200`) and flashes the wrapped image at `0x00008000`.
+
+Do not run `cargo run --release` when debugging the MCUBoot image: that command
+flashes the standalone firmware at `0x00000000`. Use the MCUBoot log procedure
+below instead.
 
 ## InfiniTime MCUBoot bootloader support
 
