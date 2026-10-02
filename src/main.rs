@@ -350,10 +350,19 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     let time_rx_ble = TIME_WATCH.receiver().unwrap();
-    // Factory-programmed device address, in Bluetooth little-endian byte order.
+    // Derive a stable static-random address distinct from InfiniTime's FICR
+    // address. Android caches GATT services by address; switching firmware
+    // without changing it can leave InfiniTime's handles mapped to Kongle.
     let low = embassy_nrf::pac::FICR.deviceaddr(0).read().to_le_bytes();
     let high = embassy_nrf::pac::FICR.deviceaddr(1).read().to_le_bytes();
-    let address = [low[0], low[1], low[2], low[3], high[0], high[1] | 0xc0];
+    let address = [
+        low[0] ^ 0x80,
+        low[1],
+        low[2],
+        low[3],
+        high[0],
+        high[1] | 0xc0,
+    ];
     let copy_done =
         unsafe { core::ptr::read_volatile(ota::PRIMARY_COPY_DONE_ADDRESS as *const u8) };
     let image_ok = unsafe { core::ptr::read_volatile(ota::PRIMARY_IMAGE_OK_ADDRESS as *const u8) };
