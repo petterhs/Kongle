@@ -101,6 +101,7 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
         match data {
             [0x01, 0x04] if matches!(self.phase, Phase::Idle | Phase::Failed | Phase::Staged) => {
                 if !cfg!(feature = "ota-staging") {
+                    defmt::warn!("DFU staging is disabled in this build");
                     return Err(DfuError::ActivationDisabled);
                 }
                 // The secondary slot is also MCUBoot's rollback copy after a
@@ -110,15 +111,14 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
                 let image_ok =
                     unsafe { core::ptr::read_volatile(PRIMARY_IMAGE_OK_ADDRESS as *const u32) };
                 if !primary_allows_staging(copy_done, image_ok) {
+                    defmt::warn!(
+                        "DFU primary image is an unconfirmed trial: copy_done={:08x} image_ok={:08x}",
+                        copy_done,
+                        image_ok
+                    );
                     return Err(DfuError::UnconfirmedTrial);
                 }
-                let id = self.flash.initialize().await?;
-                defmt::info!(
-                    "DFU flash JEDEC ID: {:02x} {:02x} {:02x}",
-                    id[0],
-                    id[1],
-                    id[2]
-                );
+                self.flash.initialize().await?;
                 self.phase = Phase::Sizes;
                 self.total = 0;
                 self.received = 0;

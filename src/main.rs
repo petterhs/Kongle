@@ -142,20 +142,30 @@ async fn button_task(
 ) {
     let mut pressed_since = None;
     let mut held_sent = false;
+    // A stuck or deliberately held button at startup must not reset the app
+    // again before the bootloader's button menu can be used. Arm only after a
+    // release, then require a fresh press for a long hold.
+    let mut armed = !button.is_pressed();
     loop {
         if let Some(event) = button.poll() {
-            match event {
-                InputEvent::ButtonPressed => {
-                    pressed_since = Some(Instant::now());
-                    held_sent = false;
+            if !armed {
+                if matches!(event, InputEvent::ButtonReleased) {
+                    armed = true;
                 }
-                InputEvent::ButtonReleased => {
-                    pressed_since = None;
-                    held_sent = false;
+            } else {
+                match event {
+                    InputEvent::ButtonPressed => {
+                        pressed_since = Some(Instant::now());
+                        held_sent = false;
+                    }
+                    InputEvent::ButtonReleased => {
+                        pressed_since = None;
+                        held_sent = false;
+                    }
+                    _ => {}
                 }
-                _ => {}
+                sender.send(event).await;
             }
-            sender.send(event).await;
         }
         if !held_sent
             && pressed_since
@@ -206,8 +216,8 @@ async fn main(spawner: Spawner) {
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
 
-    // When running under the MCUBoot bootloader, it starts the WDT before jumping here.
-    // Adopt it before BLE initialization and its startup delay. This does not confirm a trial image.
+    // Adopt an already-running watchdog before BLE initialization and its
+    // startup delay. This does not confirm a trial image.
     if let Some(wdt_config) = embassy_nrf::wdt::Config::try_new(&p.WDT) {
         defmt::info!(
             "WDT is running (bootloader started it); timeout_ticks={}",
@@ -220,7 +230,7 @@ async fn main(spawner: Spawner) {
             defmt::warn!("WDT config/handle count mismatch; watchdog may timeout (bootloader may use >1 handle)");
         }
     } else {
-        defmt::info!("WDT not running (standalone mode)");
+        defmt::info!("WDT not running; no watchdog to adopt");
     }
 
     apache_nimble::initialize_nimble();

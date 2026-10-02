@@ -66,6 +66,12 @@ impl<SPI: SpiDevice<u8>> Flash<SPI> {
         Timer::after(Duration::from_millis(1)).await;
         let mut id = [0; 3];
         self.command_read(&[0x9f], &mut id)?;
+        defmt::info!(
+            "DFU flash JEDEC ID: {:02x} {:02x} {:02x}",
+            id[0],
+            id[1],
+            id[2]
+        );
         // Accept reported JEDEC IDs for PineTime's 4 MiB flash variants;
         // check the specific board against its bootloader before activation.
         if !matches!(id[0], 0x0b | 0x16 | 0x68) || id[1] != 0x40 || id[2] != 0x16 {

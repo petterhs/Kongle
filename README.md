@@ -85,7 +85,7 @@ Kongle can be run under the [Pinetime MCUBoot bootloader](https://github.com/Inf
   nc localhost 6969 | defmt-print -e target/mcuboot/thumbv7em-none-eabihf/release/kongle
   ```
 
-On reset, the MCUBoot bootloader should show its logo and then start Kongle. Immediately before handing off to the application, the bootloader starts a 7-second hardware watchdog; Kongle feeds it every second when it detects the bootloader has already started it.
+On reset, the MCUBoot bootloader should show its logo and then start Kongle. Kongle feeds the bootloader's hardware watchdog every second if it finds one already running. A log saying the watchdog is not running does not, by itself, establish whether MCUBoot ran.
 
 This is a debugger-flashed development baseline. With the opt-in `ota-staging`
 feature, Kongle can receive and verify a Nordic legacy DFU image in external
