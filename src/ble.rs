@@ -165,103 +165,105 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
         let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
     }
 
-    loop {
-        // Only the wait for the next event is cancellable. A CTS tick must not
-        // drop an in-flight DFU erase/write/validation future: doing so loses
-        // the GATT event and its required control-point response.
-        if let Some(t) = time_rx.try_changed() {
-            let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
-        }
-        let event = match embassy_futures::select::select(conn.next(), time_rx.changed()).await {
-            embassy_futures::select::Either::First(event) => event,
-            embassy_futures::select::Either::Second(t) => {
+    // Keep the GATT listener alive for the entire connection. Cancelling even
+    // conn.next() on each clock tick can lose an unacknowledged DFU packet;
+    // Furu then waits forever for a receipt at the requested packet count.
+    let _ = embassy_futures::select::select(
+        async {
+            loop {
+                match conn.next().await {
+                    GattConnectionEvent::Disconnected { reason } => {
+                        defmt::info!("[gatt] disconnected: {:?}", reason);
+                        break;
+                    }
+                    GattConnectionEvent::Gatt { event } => {
+                        let mut dfu_reply = None;
+                        let error = match &event {
+                            GattEvent::Write(write)
+                                if write.handle()
+                                    == server.current_time_service.current_time.handle =>
+                            {
+                                let data = write.data();
+                                if data.len() != 10 {
+                                    Some(AttErrorCode::INVALID_ATTRIBUTE_VALUE_LENGTH)
+                                } else if let Some(dt) = parse_cts(data) {
+                                    // Acknowledged writes must actually reach the clock task.
+                                    set_time_tx
+                                        .try_send(dt)
+                                        .err()
+                                        .map(|_| AttErrorCode::INSUFFICIENT_RESOURCES)
+                                } else {
+                                    Some(AttErrorCode::VALUE_NOT_ALLOWED)
+                                }
+                            }
+                            GattEvent::Write(write)
+                                if write.handle() == server.dfu_service.control_point.handle =>
+                            {
+                                let opcode = write.data().first().copied().unwrap_or(0);
+                                match dfu.control(write.data()).await {
+                                    Ok(reply) => {
+                                        dfu_reply = reply;
+                                    }
+                                    Err(e) => {
+                                        defmt::warn!("[dfu] control error: {:?}", e);
+                                        dfu.fail();
+                                        dfu_reply = Some(dfu::failure_response(opcode));
+                                    }
+                                }
+                                None
+                            }
+                            GattEvent::Write(write)
+                                if write.handle() == server.dfu_service.packet.handle =>
+                            {
+                                match dfu.packet(write.data()).await {
+                                    Ok(reply) => {
+                                        dfu_reply = reply;
+                                    }
+                                    Err(e) => {
+                                        defmt::warn!("[dfu] packet error: {:?}", e);
+                                        let opcode = dfu.packet_failure_opcode();
+                                        dfu.fail();
+                                        dfu_reply = Some(dfu::failure_response(opcode));
+                                    }
+                                }
+                                None
+                            }
+                            _ => None,
+                        };
+                        let response = match error {
+                            Some(error) => event.reject(error),
+                            None => event.accept(),
+                        };
+                        match response {
+                            Ok(reply) => reply.send().await,
+                            Err(e) => defmt::warn!("[gatt] error sending response: {:?}", e),
+                        }
+                        if let Some(reply) = dfu_reply {
+                            if let Ok(payload) = heapless09::Vec::<u8, 20>::from_slice(&reply) {
+                                if server
+                                    .dfu_service
+                                    .control_point
+                                    .notify(conn, &payload)
+                                    .await
+                                    .is_err()
+                                {
+                                    defmt::warn!("[dfu] failed to notify control point");
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        },
+        async {
+            loop {
+                let t = time_rx.changed().await;
                 let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
-                continue;
             }
-        };
-        match event {
-            GattConnectionEvent::Disconnected { reason } => {
-                defmt::info!("[gatt] disconnected: {:?}", reason);
-                break;
-            }
-            GattConnectionEvent::Gatt { event } => {
-                let mut dfu_reply = None;
-                let error = match &event {
-                    GattEvent::Write(write)
-                        if write.handle() == server.current_time_service.current_time.handle =>
-                    {
-                        let data = write.data();
-                        if data.len() != 10 {
-                            Some(AttErrorCode::INVALID_ATTRIBUTE_VALUE_LENGTH)
-                        } else if let Some(dt) = parse_cts(data) {
-                            // Acknowledged writes must actually reach the clock task.
-                            set_time_tx
-                                .try_send(dt)
-                                .err()
-                                .map(|_| AttErrorCode::INSUFFICIENT_RESOURCES)
-                        } else {
-                            Some(AttErrorCode::VALUE_NOT_ALLOWED)
-                        }
-                    }
-                    GattEvent::Write(write)
-                        if write.handle() == server.dfu_service.control_point.handle =>
-                    {
-                        let opcode = write.data().first().copied().unwrap_or(0);
-                        match dfu.control(write.data()).await {
-                            Ok(reply) => {
-                                dfu_reply = reply;
-                            }
-                            Err(e) => {
-                                defmt::warn!("[dfu] control error: {:?}", e);
-                                dfu.fail();
-                                dfu_reply = Some(dfu::failure_response(opcode));
-                            }
-                        }
-                        None
-                    }
-                    GattEvent::Write(write)
-                        if write.handle() == server.dfu_service.packet.handle =>
-                    {
-                        match dfu.packet(write.data()).await {
-                            Ok(reply) => {
-                                dfu_reply = reply;
-                            }
-                            Err(e) => {
-                                defmt::warn!("[dfu] packet error: {:?}", e);
-                                let opcode = dfu.packet_failure_opcode();
-                                dfu.fail();
-                                dfu_reply = Some(dfu::failure_response(opcode));
-                            }
-                        }
-                        None
-                    }
-                    _ => None,
-                };
-                let response = match error {
-                    Some(error) => event.reject(error),
-                    None => event.accept(),
-                };
-                match response {
-                    Ok(reply) => reply.send().await,
-                    Err(e) => defmt::warn!("[gatt] error sending response: {:?}", e),
-                }
-                if let Some(reply) = dfu_reply {
-                    if let Ok(payload) = heapless09::Vec::<u8, 20>::from_slice(&reply) {
-                        if server
-                            .dfu_service
-                            .control_point
-                            .notify(conn, &payload)
-                            .await
-                            .is_err()
-                        {
-                            defmt::warn!("[dfu] failed to notify control point");
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+        },
+    )
+    .await;
     dfu.on_disconnect();
 }
 

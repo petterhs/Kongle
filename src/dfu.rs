@@ -146,6 +146,7 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
             [0x03] if self.phase == Phase::InitComplete && self.prn > 0 => {
                 self.phase = Phase::Receiving;
                 self.last_percent = Some(0);
+                defmt::info!("DFU receiving {} bytes, PRN {}", self.total, self.prn);
                 OTA_WATCH.sender().send(UpdateStatus::Receiving {
                     received: 0,
                     total: self.total,
@@ -213,6 +214,9 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
                 if !packet_len_ok(data.len(), remaining) {
                     return Err(DfuError::Protocol);
                 }
+                if self.packet_count == 0 {
+                    defmt::info!("DFU first image packet: {} bytes", data.len());
+                }
                 self.flash
                     .write_image(SECONDARY_SLOT_START + self.received, data)
                     .await?;
@@ -230,6 +234,13 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
                     self.phase = Phase::Received;
                     Ok(Some(notification(&[0x10, 0x03, 0x01])))
                 } else if self.packet_count % self.prn as u32 == 0 {
+                    if self.packet_count <= 100 || self.packet_count % 100 == 0 {
+                        defmt::info!(
+                            "DFU receipt: {} packets, {} bytes",
+                            self.packet_count,
+                            self.received
+                        );
+                    }
                     let mut response = notification(&[0x11]);
                     response
                         .extend_from_slice(&self.received.to_le_bytes())
