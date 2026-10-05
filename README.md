@@ -58,6 +58,16 @@ with the host's reason, and advertising restart. On a development board,
 capture RTT alongside Android logcat to distinguish link loss from a watch
 reset (`Kongle started` appears again). Closed watches have no RTT access.
 
+The firmware version and short build commit appear to the left of the seconds
+counter, and are available through the standard BLE Device Information Service
+(Firmware Revision String). The display and backlight sleep after 30 seconds of
+inactivity. A short button press toggles the display; a three-second hold still
+restarts into the MCUBoot button menu. BLE, the clock, battery sampling, and the
+bootloader watchdog continue while the display is asleep. An incoming OTA
+transfer wakes the display to show progress and keeps it awake through
+validation. Measure battery runtime on hardware before relying on this as a
+full low-power mode.
+
 ## Two ways to run on dev kit with debugger
 
 - **Standalone (no bootloader)** – for rapid development: `cargo run --release` builds and flashes the firmware at `0x00000000`, replacing the bootloader if one is installed. Use this with the standalone debug workflow above.

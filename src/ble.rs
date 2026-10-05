@@ -14,7 +14,7 @@ use static_cell::StaticCell;
 use trouble_host::prelude::DefaultPacketPool;
 use trouble_host::prelude::*;
 
-use crate::{current_time::parse_cts, dfu, flash::Flash, TimeState};
+use crate::{current_time::parse_cts, dfu, flash::Flash, TimeState, FIRMWARE_VERSION};
 use embedded_hal::spi::SpiDevice;
 
 /// Max number of connections
@@ -32,6 +32,16 @@ const CTS_CHAR_UUID: &str = "00002a2b-0000-1000-8000-00805f9b34fb";
 struct Server {
     current_time_service: CurrentTimeService,
     dfu_service: DfuService,
+    // Append new services so existing CTS/DFU handles remain stable for
+    // Android's cached GATT database at Kongle's persistent BLE address.
+    device_information: DeviceInformationService,
+}
+
+/// Standard Device Information Service. Furu reads Firmware Revision from it.
+#[gatt_service(uuid = "0000180a-0000-1000-8000-00805f9b34fb")]
+struct DeviceInformationService {
+    #[characteristic(uuid = "00002a26-0000-1000-8000-00805f9b34fb", read)]
+    firmware_revision: heapless09::Vec<u8, 32>,
 }
 
 #[gatt_service(uuid = "00001530-1212-efde-1523-785feabcd123")]
@@ -109,6 +119,14 @@ pub async fn run<C, S>(
         });
         GATT_SERVER.init(Server::new_with_config(gap).unwrap())
     };
+    let firmware_revision = heapless09::Vec::<u8, 32>::from_slice(FIRMWARE_VERSION.as_bytes())
+        .expect("firmware version fits the GATT characteristic");
+    server
+        .set(
+            &server.device_information.firmware_revision,
+            &firmware_revision,
+        )
+        .unwrap();
 
     let mut time_rx = time_rx;
     connected_tx.send(false);

@@ -39,6 +39,38 @@ use device::input::InputEvent;
 use fonts::JETBRAINS_FONT_54_POINT_EXTRA_BOLD;
 use ota::UpdateStatus;
 
+pub(crate) const FIRMWARE_VERSION: &str =
+    concat!(env!("CARGO_PKG_VERSION"), "+", env!("KONGLE_BUILD_ID"));
+
+fn update_text(status: UpdateStatus) -> String<22> {
+    let mut text = String::new();
+    match status {
+        UpdateStatus::Idle => {}
+        UpdateStatus::Erasing => {
+            let _ = text.push_str("Preparing update");
+        }
+        UpdateStatus::Receiving { .. } => {
+            let _ = write!(&mut text, "Update {}%", status.percent().unwrap_or(0));
+        }
+        UpdateStatus::Validating => {
+            let _ = text.push_str("Verifying update");
+        }
+        UpdateStatus::Staged => {
+            let _ = text.push_str("Update staged");
+        }
+        UpdateStatus::ReadyToRestart => {
+            let _ = text.push_str("Update ready");
+        }
+        UpdateStatus::Trial => {
+            let _ = text.push_str("Trial: reset reverts");
+        }
+        UpdateStatus::Failed => {
+            let _ = text.push_str("Update failed");
+        }
+    }
+    text
+}
+
 embassy_nrf::bind_interrupts!(struct Irqs {
     TWISPI0 => embassy_nrf::spim::InterruptHandler<embassy_nrf::peripherals::TWISPI0>;
     SAADC => embassy_nrf::saadc::InterruptHandler;
@@ -161,7 +193,11 @@ async fn button_task(
                     }
                     InputEvent::ButtonReleased => {
                         pressed_since = None;
-                        held_sent = false;
+                        // A release following the recovery hold is not a tap.
+                        if held_sent {
+                            held_sent = false;
+                            continue;
+                        }
                     }
                     _ => {}
                 }
@@ -333,6 +369,7 @@ async fn main(spawner: Spawner) {
     let battery_pos = Point::new(display_cfg::BATTERY_POS_X, display_cfg::BATTERY_POS_Y);
     let update_pos = Point::new(display_cfg::UPDATE_POS_X, display_cfg::UPDATE_POS_Y);
     let ble_pos = Point::new(display_cfg::BLE_POS_X, display_cfg::BLE_POS_Y);
+    let version_pos = Point::new(display_cfg::VERSION_POS_X, display_cfg::VERSION_POS_Y);
     let time_bounds = display_cfg::text_bounds(time_font, display_cfg::TIME_CHARS, time_pos);
     let seconds_bounds =
         display_cfg::text_bounds(seconds_font, display_cfg::SECONDS_CHARS, seconds_pos);
@@ -344,6 +381,7 @@ async fn main(spawner: Spawner) {
     let clear_style = PrimitiveStyleBuilder::new()
         .fill_color(display_cfg::BACKGROUND_COLOR)
         .build();
+    let _ = Text::new(FIRMWARE_VERSION, version_pos, seconds_style).draw(&mut display);
 
     let charge_pin = Input::new(p.P0_12, Pull::Up);
     let channel = saadc::ChannelConfig::single_ended(p.P0_31);
@@ -404,7 +442,11 @@ async fn main(spawner: Spawner) {
     let mut last_time: Option<TimeState> = None;
     let mut last_seconds: Option<u8> = None;
     let mut last_battery: Option<BatteryState> = None;
-    let mut brightness: u8 = 7;
+    let mut last_ota = UpdateStatus::Idle;
+    let mut ble_connected = false;
+    let mut awake = true;
+    let mut sleep_at = Instant::now() + Duration::from_secs(30);
+    let mut redraw = false;
     loop {
         match embassy_futures::select::select(
             ota_rx.changed(),
@@ -419,40 +461,36 @@ async fn main(spawner: Spawner) {
         .await
         {
             embassy_futures::select::Either::First(status) => {
-                update_bounds
-                    .into_styled(clear_style)
-                    .draw(&mut display)
-                    .ok();
-                let mut text: String<22> = String::new();
-                match status {
-                    UpdateStatus::Idle => {}
-                    UpdateStatus::Erasing => {
-                        let _ = text.push_str("Preparing update");
-                    }
-                    UpdateStatus::Receiving { .. } => {
-                        let _ = write!(&mut text, "Update {}%", status.percent().unwrap_or(0));
-                    }
-                    UpdateStatus::Validating => {
-                        let _ = text.push_str("Verifying update");
-                    }
-                    UpdateStatus::Staged => {
-                        let _ = text.push_str("Update staged");
-                    }
-                    UpdateStatus::ReadyToRestart => {
-                        let _ = text.push_str("Update ready");
-                    }
-                    UpdateStatus::Trial => {
-                        let _ = text.push_str("Trial: reset reverts");
-                    }
-                    UpdateStatus::Failed => {
-                        let _ = text.push_str("Update failed");
-                    }
+                last_ota = status;
+                sleep_at = Instant::now() + Duration::from_secs(30);
+                if matches!(
+                    status,
+                    UpdateStatus::Erasing
+                        | UpdateStatus::Receiving { .. }
+                        | UpdateStatus::Validating
+                ) && !awake
+                {
+                    awake = true;
+                    redraw = true;
                 }
-                let _ = Text::new(&text, update_pos, update_style).draw(&mut display);
+                if !awake {
+                    continue;
+                }
+                if !redraw {
+                    update_bounds
+                        .into_styled(clear_style)
+                        .draw(&mut display)
+                        .ok();
+                    let text = update_text(status);
+                    let _ = Text::new(&text, update_pos, update_style).draw(&mut display);
+                }
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::First(
                 time,
             )) => {
+                if !awake {
+                    continue;
+                }
                 if last_time
                     .map(|t| t.hours != time.hours || t.minutes != time.minutes)
                     .unwrap_or(true)
@@ -477,6 +515,9 @@ async fn main(spawner: Spawner) {
             embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
                 embassy_futures::select::Either::First(battery_state),
             )) => {
+                if !awake {
+                    continue;
+                }
                 if last_battery != Some(battery_state) {
                     battery_bounds
                         .into_styled(clear_style)
@@ -500,9 +541,12 @@ async fn main(spawner: Spawner) {
                     event,
                 )),
             )) => {
-                if matches!(event, InputEvent::ButtonPressed) {
-                    brightness = (brightness + 1) % 8;
-                    backlight.set(brightness);
+                if matches!(event, InputEvent::ButtonReleased) {
+                    awake = !awake;
+                    if awake {
+                        redraw = true;
+                        sleep_at = Instant::now() + Duration::from_secs(30);
+                    }
                 }
                 #[cfg(feature = "mcuboot")]
                 if matches!(event, InputEvent::ButtonHeld) {
@@ -515,12 +559,84 @@ async fn main(spawner: Spawner) {
                     connected,
                 )),
             )) => {
+                ble_connected = connected;
+                if !awake {
+                    continue;
+                }
                 ble_bounds.into_styled(clear_style).draw(&mut display).ok();
                 if connected {
                     let _ = Text::new("B", ble_pos, battery_style).draw(&mut display);
                 }
             }
         }
-        defmt::info!("heartbeat");
+        if awake
+            && Instant::now() >= sleep_at
+            && !matches!(
+                last_ota,
+                UpdateStatus::Erasing | UpdateStatus::Receiving { .. } | UpdateStatus::Validating
+            )
+        {
+            awake = false;
+        }
+        if !awake {
+            if !display.is_sleeping() {
+                backlight.off();
+                display.sleep(&mut DeferredDelay).unwrap();
+                Timer::after(Duration::from_millis(120)).await;
+                defmt::info!("Display asleep; BLE remains active");
+            }
+            continue;
+        }
+        if display.is_sleeping() {
+            display.wake(&mut DeferredDelay).unwrap();
+            Timer::after(Duration::from_millis(120)).await;
+            backlight.set(7);
+            redraw = true;
+            defmt::info!("Display awake");
+        }
+        if redraw {
+            display.clear(display_cfg::BACKGROUND_COLOR).unwrap();
+            let _ = Text::new(FIRMWARE_VERSION, version_pos, seconds_style).draw(&mut display);
+            last_time = None;
+            last_seconds = None;
+            last_battery = None;
+            if ble_connected {
+                let _ = Text::new("B", ble_pos, battery_style).draw(&mut display);
+            }
+            if let Some(time) = time_rx.try_get() {
+                let mut time_text: String<8> = String::new();
+                let _ = write!(&mut time_text, "{:02}:{:02}", time.hours, time.minutes);
+                let _ = Text::new(&time_text, time_pos, time_style).draw(&mut display);
+                let mut seconds_text: String<2> = String::new();
+                let _ = write!(&mut seconds_text, "{:02}", time.seconds);
+                let _ = Text::new(&seconds_text, seconds_pos, seconds_style).draw(&mut display);
+                last_time = Some(time);
+                last_seconds = Some(time.seconds);
+            }
+            if let Some(battery_state) = battery_rx.try_get() {
+                let mut battery_text: String<16> = String::new();
+                let charging = if battery_state.charging { "+" } else { "" };
+                let _ = write!(
+                    &mut battery_text,
+                    "{}.{:02}V{} {}%",
+                    battery_state.mv / 1000,
+                    (battery_state.mv % 1000) / 10,
+                    charging,
+                    battery_state.percent
+                );
+                let _ = Text::new(&battery_text, battery_pos, battery_style).draw(&mut display);
+                last_battery = Some(battery_state);
+            }
+            let text = update_text(last_ota);
+            let _ = Text::new(&text, update_pos, update_style).draw(&mut display);
+            redraw = false;
+        }
     }
+}
+
+/// The display library sends the sleep command synchronously. Its required
+/// 120 ms settling time is awaited by the caller so BLE is not starved.
+struct DeferredDelay;
+impl embedded_hal::delay::DelayNs for DeferredDelay {
+    fn delay_ns(&mut self, _ns: u32) {}
 }
