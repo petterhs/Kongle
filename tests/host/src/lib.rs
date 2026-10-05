@@ -8,12 +8,84 @@ mod display;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use display_interface::{DataFormat, DisplayError, WriteOnlyDataCommand};
     use embedded_graphics::{
         mono_font::{ascii::FONT_10X20, MonoTextStyle},
         pixelcolor::Rgb565,
         prelude::*,
         text::Text,
     };
+    use embedded_hal::delay::DelayNs;
+    use mipidsi::{dcs::Dcs, models::Model, options::ModelOptions, NoResetPin};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+
+    #[test]
+    fn pinetime_display_programs_orientation_before_sleep_out() {
+        struct TraceDisplay {
+            commands: Rc<RefCell<Vec<(u8, u64)>>>,
+            elapsed_ns: Rc<Cell<u64>>,
+        }
+
+        impl WriteOnlyDataCommand for TraceDisplay {
+            fn send_commands(&mut self, data: DataFormat<'_>) -> Result<(), DisplayError> {
+                if let DataFormat::U8(bytes) = data {
+                    for &byte in bytes {
+                        self.commands
+                            .borrow_mut()
+                            .push((byte, self.elapsed_ns.get()));
+                    }
+                }
+                Ok(())
+            }
+
+            fn send_data(&mut self, _data: DataFormat<'_>) -> Result<(), DisplayError> {
+                Ok(())
+            }
+        }
+
+        struct TraceDelay(Rc<Cell<u64>>);
+        impl DelayNs for TraceDelay {
+            fn delay_ns(&mut self, ns: u32) {
+                self.0.set(self.0.get() + u64::from(ns));
+            }
+        }
+
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let elapsed_ns = Rc::new(Cell::new(0));
+        let mut dcs = Dcs::write_only(TraceDisplay {
+            commands: commands.clone(),
+            elapsed_ns: elapsed_ns.clone(),
+        });
+        let mut delay = TraceDelay(elapsed_ns);
+        let mut reset: Option<NoResetPin> = None;
+        display::PineTimeSt7789
+            .init(
+                &mut dcs,
+                &mut delay,
+                &ModelOptions::with_all((240, 240), (0, 0)),
+                &mut reset,
+            )
+            .unwrap();
+
+        let commands = commands.borrow();
+        let time_of = |instruction| {
+            let (index, (_, at)) = commands
+                .iter()
+                .enumerate()
+                .find(|(_, (command, _))| *command == instruction)
+                .unwrap();
+            (index, *at)
+        };
+        let (madctl_index, _) = time_of(0x36);
+        let (sleep_out_index, sleep_out_at) = time_of(0x11);
+        let (display_on_index, display_on_at) = time_of(0x29);
+        assert!(madctl_index < sleep_out_index);
+        assert!(sleep_out_index < display_on_index);
+        assert!(display_on_at - sleep_out_at >= 120_000_000);
+    }
 
     #[test]
     fn current_time_requires_complete_value() {
