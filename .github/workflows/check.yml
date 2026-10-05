@@ -25,6 +25,8 @@ jobs:
         run: nix profile add github:cachix/devenv/b904dcb51fe48c30db250038241507f60752f222
       - name: Check and build both layouts
         run: devenv shell -- bash scripts/check.sh
+      - name: Package OTA-capable trial firmware
+        run: devenv shell -- env KONGLE_FEATURES=mcuboot,ota-activation bash scripts/build-dfu-package.sh
       - name: Upload development firmware
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -33,3 +35,4 @@ jobs:
           path: |
             target/mcuboot/thumbv7em-none-eabihf/release/kongle
             target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/pinetime-mcuboot-app-image.bin
+            target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/kongle-mcuboot-app-dfu-*.zip
