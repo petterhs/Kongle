@@ -49,8 +49,10 @@ directory. The default `scripts/flash_app.sh` build uses `mcuboot` alone and
 does not enable staging.
 The activation validator also accepts InfiniTime's application-only MCUBoot
 DFU ZIPs. InfiniTime 1.16.1 uses a 32-byte image header, whereas Kongle's
-image has a 512-byte header; both still require a full flash readback and a
-matching init-packet CRC before the trial marker is written.
+image has a 512-byte header. It reads the header length from each image and
+checks its bounds, rather than requiring either specific length. A full flash
+readback and a matching init-packet CRC are required before the trial marker
+is written; MCUBoot performs its own image validation when it boots.
 In Furu, enable the `infinitime.dfu` feature for the Kongle device profile
 before selecting the ZIP. Furu should finish the transfer, and Kongle should
 reset into the new image. The watch shows `Trial: reset reverts` while the

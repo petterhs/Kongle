@@ -211,6 +211,18 @@ mod tests {
         );
         header[8..10].copy_from_slice(&0x200u16.to_le_bytes());
         header[12..16].copy_from_slice(&0x3e00u32.to_le_bytes());
+        header[8..10].copy_from_slice(&0x100u16.to_le_bytes());
+        assert!(
+            ota::ActivationPlan::from_readback(0x4000, 0x4000, 0x1234, 0x1234, &header).is_some()
+        );
+        for invalid_header_size in [0x10u16, 0x21, 0x4000] {
+            header[8..10].copy_from_slice(&invalid_header_size.to_le_bytes());
+            assert!(
+                ota::ActivationPlan::from_readback(0x4000, 0x4000, 0x1234, 0x1234, &header)
+                    .is_none()
+            );
+        }
+        header[8..10].copy_from_slice(&0x200u16.to_le_bytes());
         assert!(
             ota::ActivationPlan::from_readback(0x3fff, 0x4000, 0x1234, 0x1234, &header).is_none()
         );

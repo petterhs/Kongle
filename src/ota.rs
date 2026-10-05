@@ -108,17 +108,20 @@ impl ActivationPlan {
     ) -> Option<Self> {
         let image_limit = MAX_IMAGE_SIZE;
         let header_is_mcuboot = header[..4] == [0x3d, 0xb8, 0xf3, 0x96];
-        let header_size = u16::from_le_bytes([header[8], header[9]]);
+        let header_size = u16::from_le_bytes([header[8], header[9]]) as u32;
         let payload_size = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
         if received != declared_size
             || !(0x200..=image_limit).contains(&received)
             || expected_crc16 != readback_crc16
             || !header_is_mcuboot
-            // InfiniTime uses the standard 32-byte MCUBoot header, while
-            // Kongle pads its own header to 512 bytes for the vector offset.
-            || !matches!(header_size, 0x20 | 0x200)
+            // MCUBoot records the header length in the image. The minimum is
+            // its 32-byte fixed header; callers may pad it for their linker
+            // layout (InfiniTime uses 32, Kongle uses 512).
+            || header_size < 0x20
+            || header_size % 4 != 0
+            || header_size >= received
             || payload_size == 0
-            || payload_size > received - header_size as u32
+            || payload_size > received - header_size
         {
             return None;
         }
