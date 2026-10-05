@@ -189,9 +189,28 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
                     crc,
                     &header,
                 ) else {
+                    defmt::warn!(
+                        "DFU validation rejected: received={} declared={} expected_crc={:04x} readback_crc={:04x} header={:02x} {:02x} {:02x} {:02x} header_size={} payload_size={}",
+                        self.received,
+                        self.total,
+                        self.expected_crc,
+                        crc,
+                        header[0],
+                        header[1],
+                        header[2],
+                        header[3],
+                        u16::from_le_bytes([header[8], header[9]]),
+                        u32::from_le_bytes([header[12], header[13], header[14], header[15]])
+                    );
                     self.fail();
                     return Ok(Some(failure_response(0x04)));
                 };
+                defmt::info!(
+                    "DFU readback verified: {} bytes, CRC {:04x}, MCUBoot header {} bytes",
+                    self.total,
+                    crc,
+                    u16::from_le_bytes([header[8], header[9]])
+                );
                 self.phase = Phase::Staged;
                 OTA_WATCH.sender().send(UpdateStatus::Staged);
                 #[cfg(feature = "ota-activation")]

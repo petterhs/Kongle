@@ -114,7 +114,9 @@ impl ActivationPlan {
             || !(0x200..=image_limit).contains(&received)
             || expected_crc16 != readback_crc16
             || !header_is_mcuboot
-            || header_size != 0x200
+            // InfiniTime uses the standard 32-byte MCUBoot header, while
+            // Kongle pads its own header to 512 bytes for the vector offset.
+            || !matches!(header_size, 0x20 | 0x200)
             || payload_size == 0
             || payload_size > received - header_size as u32
         {

@@ -199,6 +199,18 @@ mod tests {
         assert!(
             ota::ActivationPlan::from_readback(0x4000, 0x4000, 0x1234, 0x1234, &header).is_some()
         );
+        // Values from pinetime-mcuboot-app-dfu-1.16.1.zip: a 32-byte header,
+        // 386176-byte payload and 386248-byte transfer with CRC 0xf40b.
+        header[8..10].copy_from_slice(&0x20u16.to_le_bytes());
+        header[12..16].copy_from_slice(&386176u32.to_le_bytes());
+        assert!(
+            ota::ActivationPlan::from_readback(386248, 386248, 0xf40b, 0xf40b, &header).is_some()
+        );
+        assert!(
+            ota::ActivationPlan::from_readback(386248, 386248, 0xf40b, 0xf40c, &header).is_none()
+        );
+        header[8..10].copy_from_slice(&0x200u16.to_le_bytes());
+        header[12..16].copy_from_slice(&0x3e00u32.to_le_bytes());
         assert!(
             ota::ActivationPlan::from_readback(0x3fff, 0x4000, 0x1234, 0x1234, &header).is_none()
         );
