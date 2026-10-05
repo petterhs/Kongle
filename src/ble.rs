@@ -1,16 +1,21 @@
-//! BLE peripheral with Current Time Service (CTS) for time sync over BLE.
+//! BLE peripheral with Current Time Service and Nordic legacy application DFU.
 //! Uses trouble-host with Apache NimBLE controller (no nRF SoftDevice).
 
 use chrono::NaiveDateTime;
 use embassy_futures::join::join;
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, watch::Receiver,
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    channel::Sender,
+    watch::{Receiver, Sender as WatchSender},
 };
+#[cfg(feature = "ota-activation")]
+use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 use trouble_host::prelude::DefaultPacketPool;
 use trouble_host::prelude::*;
 
-use crate::{current_time::parse_cts, TimeState};
+use crate::{current_time::parse_cts, dfu, flash::Flash, TimeState};
+use embedded_hal::spi::SpiDevice;
 
 /// Max number of connections
 const CONNECTIONS_MAX: usize = 1;
@@ -22,10 +27,26 @@ const CTS_SERVICE_UUID: &str = "00001805-0000-1000-8000-00805f9b34fb";
 /// Current Time characteristic (0x2A2B); literal required by macro
 const CTS_CHAR_UUID: &str = "00002a2b-0000-1000-8000-00805f9b34fb";
 
-/// GATT Server with Current Time Service only (macros from prelude must be in scope)
+/// GATT server with CTS and opt-in Nordic legacy DFU staging.
 #[gatt_server]
 struct Server {
     current_time_service: CurrentTimeService,
+    dfu_service: DfuService,
+}
+
+#[gatt_service(uuid = "00001530-1212-efde-1523-785feabcd123")]
+struct DfuService {
+    #[characteristic(
+        uuid = "00001531-1212-efde-1523-785feabcd123",
+        write,
+        write_without_response,
+        notify
+    )]
+    control_point: heapless09::Vec<u8, 20>,
+    #[characteristic(uuid = "00001532-1212-efde-1523-785feabcd123", write_without_response)]
+    packet: heapless09::Vec<u8, 20>,
+    #[characteristic(uuid = "00001534-1212-efde-1523-785feabcd123", read, value = 8)]
+    revision: u16,
 }
 
 /// Current Time Service: single characteristic (Current Time, 10 bytes)
@@ -57,13 +78,16 @@ fn encode_cts(t: &TimeState) -> [u8; 10] {
 }
 
 /// Run the BLE stack: advertise "Kongle", expose CTS, handle read/write and set-time channel.
-pub async fn run<C>(
+pub async fn run<C, S>(
     controller: C,
     address: [u8; 6],
     time_rx: Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
+    connected_tx: WatchSender<'static, CriticalSectionRawMutex, bool, 2>,
+    mut flash: Flash<S>,
 ) where
     C: Controller + 'static,
+    S: SpiDevice<u8>,
 {
     let address = Address::random(address);
     defmt::info!("BLE address = {:?}", address);
@@ -77,7 +101,7 @@ pub async fn run<C>(
         ..
     } = stack.build();
 
-    defmt::info!("Starting BLE advertising and CTS");
+    defmt::info!("Starting BLE advertising, CTS and DFU staging");
     let server: &Server<'static> = {
         let gap = GapConfig::Peripheral(PeripheralConfig {
             name: "Kongle",
@@ -87,6 +111,7 @@ pub async fn run<C>(
     };
 
     let mut time_rx = time_rx;
+    connected_tx.send(false);
     if let Some(t) = time_rx.try_changed() {
         let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
     }
@@ -95,20 +120,32 @@ pub async fn run<C>(
             match advertise("Kongle", &mut peripheral).await {
                 Ok(advertiser) => {
                     defmt::info!("[adv] advertising");
-                    if let Ok(conn) = advertiser
-                        .accept()
-                        .await
-                        .and_then(|c| c.with_attribute_server(server))
-                    {
-                        defmt::info!("[adv] connection established");
-                        gatt_events_and_time_sync_task(server, &conn, &mut time_rx, &set_time_tx)
-                            .await;
-                    } else {
-                        defmt::warn!("[adv] error while accepting/attaching GATT server");
+                    match advertiser.accept().await {
+                        Ok(raw_conn) => match raw_conn.with_attribute_server(server) {
+                            Ok(conn) => {
+                                defmt::info!("[adv] GATT connection established");
+                                connected_tx.send(true);
+                                gatt_events_and_time_sync_task(
+                                    server,
+                                    &conn,
+                                    &mut time_rx,
+                                    &set_time_tx,
+                                    &mut flash,
+                                )
+                                .await;
+                                connected_tx.send(false);
+                                defmt::info!("[adv] GATT connection closed; advertising again");
+                            }
+                            Err(e) => defmt::warn!("[adv] GATT attach failed: {:?}", e),
+                        },
+                        Err(e) => defmt::warn!("[adv] accept failed: {:?}", e),
                     }
                 }
-                Err(_e) => {
-                    defmt::warn!("[adv] error while starting advertising");
+                Err(BleHostError::BleHost(e)) => {
+                    defmt::warn!("[adv] host advertising error: {:?}", e)
+                }
+                Err(BleHostError::Controller(_)) => {
+                    defmt::warn!("[adv] controller advertising error")
                 }
             }
         }
@@ -119,34 +156,43 @@ pub async fn run<C>(
 /// Background task required by trouble-host: runs the BLE host stack.
 async fn ble_task<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, P>) {
     loop {
-        if runner.run().await.is_err() {
-            defmt::warn!("[ble_task] host error");
+        if let Err(e) = runner.run().await {
+            match e {
+                BleHostError::BleHost(error) => defmt::warn!("[ble_task] host error: {:?}", error),
+                BleHostError::Controller(_) => defmt::warn!("[ble_task] controller error"),
+            }
         }
     }
 }
 
 /// Handle GATT events and keep CTS characteristic updated from TIME_WATCH.
-async fn gatt_events_and_time_sync_task<P: PacketPool>(
+async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
     server: &Server<'static>,
     conn: &GattConnection<'_, '_, P>,
     time_rx: &mut Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: &Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
+    flash: &mut Flash<S>,
 ) {
+    let mut dfu = dfu::Receiver::new(flash);
     // Time updates are not consumed while advertising. Publish the latest one
     // before the newly connected client can read the shared GATT attribute.
     if let Some(t) = time_rx.try_changed() {
         let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
     }
 
-    loop {
-        match embassy_futures::select::select(
-            async {
+    // Keep the GATT listener alive for the entire connection. Cancelling even
+    // conn.next() on each clock tick can lose an unacknowledged DFU packet;
+    // Furu then waits forever for a receipt at the requested packet count.
+    let _ = embassy_futures::select::select(
+        async {
+            loop {
                 match conn.next().await {
                     GattConnectionEvent::Disconnected { reason } => {
                         defmt::info!("[gatt] disconnected: {:?}", reason);
-                        true
+                        break;
                     }
                     GattConnectionEvent::Gatt { event } => {
+                        let mut dfu_reply = None;
                         let error = match &event {
                             GattEvent::Write(write)
                                 if write.handle()
@@ -165,6 +211,38 @@ async fn gatt_events_and_time_sync_task<P: PacketPool>(
                                     Some(AttErrorCode::VALUE_NOT_ALLOWED)
                                 }
                             }
+                            GattEvent::Write(write)
+                                if write.handle() == server.dfu_service.control_point.handle =>
+                            {
+                                let opcode = write.data().first().copied().unwrap_or(0);
+                                match dfu.control(write.data()).await {
+                                    Ok(reply) => {
+                                        dfu_reply = reply;
+                                    }
+                                    Err(e) => {
+                                        defmt::warn!("[dfu] control error: {:?}", e);
+                                        dfu.fail();
+                                        dfu_reply = Some(dfu::failure_response(opcode));
+                                    }
+                                }
+                                None
+                            }
+                            GattEvent::Write(write)
+                                if write.handle() == server.dfu_service.packet.handle =>
+                            {
+                                match dfu.packet(write.data()).await {
+                                    Ok(reply) => {
+                                        dfu_reply = reply;
+                                    }
+                                    Err(e) => {
+                                        defmt::warn!("[dfu] packet error: {:?}", e);
+                                        let opcode = dfu.packet_failure_opcode();
+                                        dfu.fail();
+                                        dfu_reply = Some(dfu::failure_response(opcode));
+                                    }
+                                }
+                                None
+                            }
                             _ => None,
                         };
                         let response = match error {
@@ -175,22 +253,49 @@ async fn gatt_events_and_time_sync_task<P: PacketPool>(
                             Ok(reply) => reply.send().await,
                             Err(e) => defmt::warn!("[gatt] error sending response: {:?}", e),
                         }
-                        false
+                        if let Some(reply) = dfu_reply {
+                            if let Ok(payload) = heapless09::Vec::<u8, 20>::from_slice(&reply) {
+                                let trace_receipt = reply.len() == 5
+                                    && reply[0] == 0x11
+                                    && u32::from_le_bytes([reply[1], reply[2], reply[3], reply[4]])
+                                        <= 2_000;
+                                if trace_receipt {
+                                    defmt::info!("DFU queuing receipt notification");
+                                }
+                                if server
+                                    .dfu_service
+                                    .control_point
+                                    .notify(conn, &payload)
+                                    .await
+                                    .is_err()
+                                {
+                                    defmt::warn!("[dfu] failed to notify control point");
+                                } else if trace_receipt {
+                                    defmt::info!("DFU receipt notification queued");
+                                }
+                            }
+                        }
+                        #[cfg(feature = "ota-activation")]
+                        if dfu.activation_requested() {
+                            // Opcode 5 has no DFU notification. Allow the ATT
+                            // write and Android's callback to settle first.
+                            Timer::after(Duration::from_millis(500)).await;
+                            cortex_m::peripheral::SCB::sys_reset();
+                        }
                     }
-                    _ => false,
+                    _ => {}
                 }
-            },
-            time_rx.changed(),
-        )
-        .await
-        {
-            embassy_futures::select::Either::First(true) => break,
-            embassy_futures::select::Either::First(false) => {}
-            embassy_futures::select::Either::Second(t) => {
+            }
+        },
+        async {
+            loop {
+                let t = time_rx.changed().await;
                 let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
             }
-        }
-    }
+        },
+    )
+    .await;
+    dfu.on_disconnect();
 }
 
 /// Advertise and wait for a connection, returning an `Advertiser` handle.

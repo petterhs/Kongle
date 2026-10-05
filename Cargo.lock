@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "apache-nimble"
 version = "0.1.0"
-source = "git+https://github.com/petterhs/apache-nimble-sys.git?branch=master#78bd61f5609ee66a2b66acd548e61caad7e3dfd4"
+source = "git+https://github.com/petterhs/apache-nimble-sys.git?rev=9c872c2f215ea34ade985802bfce098583e958f1#9c872c2f215ea34ade985802bfce098583e958f1"
 dependencies = [
  "apache-nimble-sys",
  "bindgen",
@@ -32,7 +32,7 @@ dependencies = [
 [[package]]
 name = "apache-nimble-sys"
 version = "0.0.1"
-source = "git+https://github.com/petterhs/apache-nimble-sys.git?branch=master#78bd61f5609ee66a2b66acd548e61caad7e3dfd4"
+source = "git+https://github.com/petterhs/apache-nimble-sys.git?rev=9c872c2f215ea34ade985802bfce098583e958f1#9c872c2f215ea34ade985802bfce098583e958f1"
 dependencies = [
  "bindgen",
  "cbindgen",
@@ -1059,6 +1059,7 @@ dependencies = [
  "embedded-storage-async",
  "futures",
  "heapless 0.8.0",
+ "heapless 0.9.2",
  "mipidsi",
  "panic-probe",
  "st7789",

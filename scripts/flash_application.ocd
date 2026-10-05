@@ -1,9 +1,11 @@
 init
+reset init
+
+# Refuse to write a slot image if standalone flashing replaced MCUBoot.
+verify_image bootloader/bootloader-1.0.1.bin 0x00000000
 
 flash erase_address 0x00008000 0x00074000
 program target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/pinetime-mcuboot-app-image.bin verify 0x00008000
 
 reset run
-
-rtt start
-rtt server start 6969 0
+shutdown

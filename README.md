@@ -35,7 +35,8 @@ devenv shell
 # Build release firmware
 cargo build --release --locked
 
-# (Optional) Run on a connected PineTime via your debug setup
+# (Optional) Flash standalone firmware on a development board. This replaces
+# any bootloader at address 0x00000000.
 cargo run --release
 ```
 
@@ -45,16 +46,36 @@ Enter `devenv shell`; it provides the pinned `defmt-print` RTT decoder and its
 runtime libraries through Nix. Run the scripts below without sudo;
 they resolve OpenOCD from devenv before using sudo for hardware access.
 
-Terminals:
+Standalone firmware terminals:
 
   1. `bash scripts/debug.sh` (uses sudo only for OpenOCD)
   2. `cargo run --release`
   3. `nc localhost 6969 | defmt-print -e target/thumbv7em-none-eabihf/release/kongle`
 
+The small `B` at the top-right of the watch appears while a phone has an
+active GATT connection. RTT logs `[adv]` connection setup, `[gatt] disconnected`
+with the host's reason, and advertising restart. On a development board,
+capture RTT alongside Android logcat to distinguish link loss from a watch
+reset (`Kongle started` appears again). Closed watches have no RTT access.
+
 ## Two ways to run on dev kit with debugger
 
-- **Standalone (no bootloader)** – for rapid development: `cargo run --release` builds and flashes the firmware at `0x00000000`. Use this with the debug workflow above.
+- **Standalone (no bootloader)** – for rapid development: `cargo run --release` builds and flashes the firmware at `0x00000000`, replacing the bootloader if one is installed. Use this with the standalone debug workflow above.
 - **With MCUBoot bootloader** – for testing with the bootloader use `scripts/flash_app.sh`, which builds with `--features mcuboot` (FLASH at `0x08200`) and flashes the wrapped image at `0x00008000`.
+
+Do not run `cargo run --release` when debugging the MCUBoot image: GDB's `load`
+command flashes the standalone firmware at `0x00000000` and replaces the
+bootloader. Use the MCUBoot log procedure below instead. If you accidentally
+ran it, recover the ST-Link development board from `devenv shell` with:
+
+```bash
+bash scripts/flash_bootloader.sh
+KONGLE_FEATURES=mcuboot,ota-staging bash scripts/flash_app.sh
+```
+
+Run these one at a time, with no other OpenOCD session using the ST-Link. The
+bootloader should show its logo at startup. If it does not, inspect the
+OpenOCD output and do not attempt an OTA transfer yet.
 
 ## InfiniTime MCUBoot bootloader support
 
@@ -70,20 +91,29 @@ Kongle can be run under the [Pinetime MCUBoot bootloader](https://github.com/Inf
 - **Build and flash the application image**
 
   ```bash
-  bash scripts/flash_app.sh
+  KONGLE_FEATURES=mcuboot,ota-staging bash scripts/flash_app.sh
   ```
 
   (Run without `sudo` so the build sees your devenv env; the script uses `sudo` only for OpenOCD.)
 
-  This builds the firmware with `--features mcuboot` (separate from the standalone build), wraps it as an **unsigned MCUBoot image** (header `0x200`, slot `0x74000`, version from `Cargo.toml`), and programs and verifies it at `0x00008000` via OpenOCD. To build without flashing, run `bash scripts/build-mcuboot-image.sh`. OpenOCD starts RTT and stays running; view defmt output in another terminal:
+  This builds the firmware with `--features mcuboot,ota-staging` (separate from the standalone build), wraps it as an **unsigned MCUBoot image** (header `0x200`, slot `0x74000`, version from `Cargo.toml`), verifies that the pinned bootloader is installed, and programs and verifies the application at `0x00008000` via OpenOCD. To build without flashing, use the same `KONGLE_FEATURES` setting with `bash scripts/build-mcuboot-image.sh`. Without `KONGLE_FEATURES`, the script builds only `mcuboot`, which rejects DFU staging requests. The flash script resets the watch and exits. For logs, run `bash scripts/debug.sh` in one terminal, then connect to RTT from another:
 
   ```bash
   nc localhost 6969 | defmt-print -e target/mcuboot/thumbv7em-none-eabihf/release/kongle
   ```
 
-On reset, the MCUBoot bootloader should show its logo and then start Kongle. Immediately before handing off to the application, the bootloader starts a 7-second hardware watchdog; Kongle feeds it every second when it detects the bootloader has already started it.
+On reset, the MCUBoot bootloader should show its logo and then start Kongle. Kongle feeds the bootloader's hardware watchdog every second if it finds one already running. A log saying the watchdog is not running does not, by itself, establish whether MCUBoot ran.
 
-This is a debugger-flashed development baseline. Kongle does not yet implement a BLE DFU receiver or confirm a trial image as permanent. Watchdog feeding does not confirm an update. Receiving and confirming Kongle-to-Kongle updates is the next milestone; the build script currently produces a BIN, not a Nordic DFU ZIP with an init packet.
+This is a debugger-flashed development baseline. With `ota-staging`, Kongle
+receives and verifies an image but rejects final activation. For a dev-board
+trial boot, use `KONGLE_FEATURES=mcuboot,ota-activation` for both flashing the
+baseline and `scripts/build-dfu-package.sh`. Activation requests an MCUBoot
+test swap; Kongle does not confirm the new image, so resetting should revert.
+Keep this feature on the ST-Link board until rollback has been tested.
+
+The [OTA development sequence](docs/ota.md) describes the opt-in BLE staging
+receiver, watch progress UI, long-hold restart, and trial activation. Manual
+confirmation is still to be implemented after rollback testing.
 
 ## Contributing
 
