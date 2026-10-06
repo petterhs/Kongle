@@ -8,6 +8,7 @@ mod dfu;
 mod flash;
 mod fonts;
 mod ota;
+mod ui;
 
 use core::cell::RefCell;
 use core::fmt::Write;
@@ -21,12 +22,7 @@ use embassy_nrf::spim::{Config as SpimConfig, Frequency, Spim, MODE_3};
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Instant, Ticker, Timer};
-use embedded_graphics::{
-    mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
-    prelude::*,
-    primitives::PrimitiveStyleBuilder,
-    text::Text,
-};
+use embedded_graphics::prelude::*;
 use heapless::String;
 use mipidsi::Builder;
 use panic_probe as _;
@@ -36,13 +32,13 @@ use chrono::{Datelike, NaiveDateTime, Timelike};
 use device::battery::BatteryState;
 use device::display as display_cfg;
 use device::input::InputEvent;
-use fonts::JETBRAINS_FONT_54_POINT_EXTRA_BOLD;
 use ota::UpdateStatus;
+use ui::Ui;
 
 pub(crate) const FIRMWARE_VERSION: &str =
     concat!(env!("CARGO_PKG_VERSION"), "+", env!("KONGLE_BUILD_ID"));
 
-fn update_text(status: UpdateStatus) -> String<22> {
+pub(crate) fn update_text(status: UpdateStatus) -> String<22> {
     let mut text = String::new();
     match status {
         UpdateStatus::Idle => {}
@@ -345,43 +341,8 @@ async fn main(spawner: Spawner) {
 
     display.clear(display_cfg::BACKGROUND_COLOR).unwrap();
 
-    let time_font = &JETBRAINS_FONT_54_POINT_EXTRA_BOLD;
-    let time_style = MonoTextStyleBuilder::new()
-        .font(time_font)
-        .text_color(display_cfg::TEXT_COLOR)
-        .background_color(display_cfg::BACKGROUND_COLOR)
-        .build();
-    let seconds_font = &FONT_10X20;
-    let seconds_style = MonoTextStyleBuilder::new()
-        .font(seconds_font)
-        .text_color(display_cfg::TEXT_COLOR)
-        .background_color(display_cfg::BACKGROUND_COLOR)
-        .build();
-    let battery_style = MonoTextStyleBuilder::new()
-        .font(seconds_font)
-        .text_color(display_cfg::TEXT_COLOR)
-        .background_color(display_cfg::BACKGROUND_COLOR)
-        .build();
-    let update_style = battery_style;
-
-    let time_pos = Point::new(display_cfg::TIME_POS_X, display_cfg::TIME_POS_Y);
-    let seconds_pos = Point::new(display_cfg::SECONDS_POS_X, display_cfg::SECONDS_POS_Y);
-    let battery_pos = Point::new(display_cfg::BATTERY_POS_X, display_cfg::BATTERY_POS_Y);
-    let update_pos = Point::new(display_cfg::UPDATE_POS_X, display_cfg::UPDATE_POS_Y);
-    let ble_pos = Point::new(display_cfg::BLE_POS_X, display_cfg::BLE_POS_Y);
-    let version_pos = Point::new(display_cfg::VERSION_POS_X, display_cfg::VERSION_POS_Y);
-    let time_bounds = display_cfg::text_bounds(time_font, display_cfg::TIME_CHARS, time_pos);
-    let seconds_bounds =
-        display_cfg::text_bounds(seconds_font, display_cfg::SECONDS_CHARS, seconds_pos);
-    let battery_bounds =
-        display_cfg::text_bounds(seconds_font, display_cfg::BATTERY_CHARS, battery_pos);
-    let update_bounds =
-        display_cfg::text_bounds(seconds_font, display_cfg::UPDATE_CHARS, update_pos);
-    let ble_bounds = display_cfg::text_bounds(seconds_font, 1, ble_pos);
-    let clear_style = PrimitiveStyleBuilder::new()
-        .fill_color(display_cfg::BACKGROUND_COLOR)
-        .build();
-    let _ = Text::new(FIRMWARE_VERSION, version_pos, seconds_style).draw(&mut display);
+    let mut ui = Ui::new();
+    ui.draw_version(&mut display);
 
     let charge_pin = Input::new(p.P0_12, Pull::Up);
     let channel = saadc::ChannelConfig::single_ended(p.P0_31);
@@ -439,11 +400,6 @@ async fn main(spawner: Spawner) {
     let mut ble_rx = BLE_CONNECTED_WATCH.receiver().unwrap();
     let button_rx = BUTTON_CH.receiver();
 
-    let mut last_time: Option<TimeState> = None;
-    let mut last_seconds: Option<u8> = None;
-    let mut last_battery: Option<BatteryState> = None;
-    let mut last_ota = UpdateStatus::Idle;
-    let mut ble_connected = false;
     let mut awake = true;
     let mut sleep_at = Instant::now() + Duration::from_secs(30);
     let mut redraw = false;
@@ -461,7 +417,7 @@ async fn main(spawner: Spawner) {
         .await
         {
             embassy_futures::select::Either::First(status) => {
-                last_ota = status;
+                ui.set_ota(status);
                 sleep_at = Instant::now() + Duration::from_secs(30);
                 if matches!(
                     status,
@@ -477,12 +433,7 @@ async fn main(spawner: Spawner) {
                     continue;
                 }
                 if !redraw {
-                    update_bounds
-                        .into_styled(clear_style)
-                        .draw(&mut display)
-                        .ok();
-                    let text = update_text(status);
-                    let _ = Text::new(&text, update_pos, update_style).draw(&mut display);
+                    ui.update_ota(&mut display);
                 }
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::First(
@@ -491,26 +442,7 @@ async fn main(spawner: Spawner) {
                 if !awake {
                     continue;
                 }
-                if last_time
-                    .map(|t| t.hours != time.hours || t.minutes != time.minutes)
-                    .unwrap_or(true)
-                {
-                    time_bounds.into_styled(clear_style).draw(&mut display).ok();
-                    let mut time_text: String<8> = String::new();
-                    let _ = write!(&mut time_text, "{:02}:{:02}", time.hours, time.minutes);
-                    let _ = Text::new(&time_text, time_pos, time_style).draw(&mut display);
-                }
-                if last_seconds != Some(time.seconds) {
-                    seconds_bounds
-                        .into_styled(clear_style)
-                        .draw(&mut display)
-                        .ok();
-                    let mut seconds_text: String<2> = String::new();
-                    let _ = write!(&mut seconds_text, "{:02}", time.seconds);
-                    let _ = Text::new(&seconds_text, seconds_pos, seconds_style).draw(&mut display);
-                    last_seconds = Some(time.seconds);
-                }
-                last_time = Some(time);
+                ui.update_time(&mut display, time);
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
                 embassy_futures::select::Either::First(battery_state),
@@ -518,23 +450,7 @@ async fn main(spawner: Spawner) {
                 if !awake {
                     continue;
                 }
-                if last_battery != Some(battery_state) {
-                    battery_bounds
-                        .into_styled(clear_style)
-                        .draw(&mut display)
-                        .ok();
-                    let mut battery_text: String<16> = String::new();
-                    let volts = battery_state.mv / 1000;
-                    let frac = (battery_state.mv % 1000) / 10;
-                    let charging = if battery_state.charging { "+" } else { "" };
-                    let _ = write!(
-                        &mut battery_text,
-                        "{}.{:02}V{} {}%",
-                        volts, frac, charging, battery_state.percent
-                    );
-                    let _ = Text::new(&battery_text, battery_pos, battery_style).draw(&mut display);
-                    last_battery = Some(battery_state);
-                }
+                ui.update_battery(&mut display, battery_state);
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
                 embassy_futures::select::Either::Second(embassy_futures::select::Either::First(
@@ -559,20 +475,17 @@ async fn main(spawner: Spawner) {
                     connected,
                 )),
             )) => {
-                ble_connected = connected;
+                ui.set_ble_connected(connected);
                 if !awake {
                     continue;
                 }
-                ble_bounds.into_styled(clear_style).draw(&mut display).ok();
-                if connected {
-                    let _ = Text::new("B", ble_pos, battery_style).draw(&mut display);
-                }
+                ui.update_ble(&mut display);
             }
         }
         if awake
             && Instant::now() >= sleep_at
             && !matches!(
-                last_ota,
+                ui.ota(),
                 UpdateStatus::Erasing | UpdateStatus::Receiving { .. } | UpdateStatus::Validating
             )
         {
@@ -596,39 +509,7 @@ async fn main(spawner: Spawner) {
         }
         if redraw {
             display.clear(display_cfg::BACKGROUND_COLOR).unwrap();
-            let _ = Text::new(FIRMWARE_VERSION, version_pos, seconds_style).draw(&mut display);
-            last_time = None;
-            last_seconds = None;
-            last_battery = None;
-            if ble_connected {
-                let _ = Text::new("B", ble_pos, battery_style).draw(&mut display);
-            }
-            if let Some(time) = time_rx.try_get() {
-                let mut time_text: String<8> = String::new();
-                let _ = write!(&mut time_text, "{:02}:{:02}", time.hours, time.minutes);
-                let _ = Text::new(&time_text, time_pos, time_style).draw(&mut display);
-                let mut seconds_text: String<2> = String::new();
-                let _ = write!(&mut seconds_text, "{:02}", time.seconds);
-                let _ = Text::new(&seconds_text, seconds_pos, seconds_style).draw(&mut display);
-                last_time = Some(time);
-                last_seconds = Some(time.seconds);
-            }
-            if let Some(battery_state) = battery_rx.try_get() {
-                let mut battery_text: String<16> = String::new();
-                let charging = if battery_state.charging { "+" } else { "" };
-                let _ = write!(
-                    &mut battery_text,
-                    "{}.{:02}V{} {}%",
-                    battery_state.mv / 1000,
-                    (battery_state.mv % 1000) / 10,
-                    charging,
-                    battery_state.percent
-                );
-                let _ = Text::new(&battery_text, battery_pos, battery_style).draw(&mut display);
-                last_battery = Some(battery_state);
-            }
-            let text = update_text(last_ota);
-            let _ = Text::new(&text, update_pos, update_style).draw(&mut display);
+            ui.draw_full(&mut display, time_rx.try_get(), battery_rx.try_get());
             redraw = false;
         }
     }
