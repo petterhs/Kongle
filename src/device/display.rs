@@ -87,6 +87,9 @@ pub const SECONDS_POS_X: i32 = 178;
 pub const SECONDS_POS_Y: i32 = 180;
 pub const SECONDS_CHARS: u32 = 2;
 
+pub const VERSION_POS_X: i32 = 10;
+pub const VERSION_POS_Y: i32 = SECONDS_POS_Y;
+
 pub const BATTERY_POS_X: i32 = 10;
 pub const BATTERY_POS_Y: i32 = 18;
 pub const BATTERY_CHARS: u32 = 11;
