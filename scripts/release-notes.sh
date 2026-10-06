@@ -17,6 +17,14 @@ if [[ -n "$previous_stable" ]]; then
   git-cliff --config cliff.toml --tag-pattern '^$' --ignore-tags '^$' \
     --tag "$tag" --output "$output" "$previous_stable..HEAD"
 else
-  git-cliff --config cliff.toml --tag-pattern '^$' --ignore-tags '^$' \
-    --tag "$tag" --output "$output"
+  base_tag=${tag%%-*}
+  first_release_notes="docs/release-notes/${base_tag}.md"
+  if [[ -f "$first_release_notes" ]]; then
+    # The first release spans the whole pre-tag history, which has many
+    # housekeeping commits. Use a reviewed summary for that baseline.
+    sed "s/@TAG@/$tag/g" "$first_release_notes" > "$output"
+  else
+    git-cliff --config cliff.toml --tag-pattern '^$' --ignore-tags '^$' \
+      --tag "$tag" --output "$output"
+  fi
 fi
