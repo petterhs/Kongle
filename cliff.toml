@@ -1,0 +1,27 @@
+# git-cliff release notes. Existing commits are mostly not Conventional Commits,
+# so keep a catch-all until the history has naturally moved to that format.
+[changelog]
+header = "# Kongle changes\n\n"
+body = """
+## {% if version %}{{ version }}{% else %}Unreleased{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+{% for commit in commits %}- {{ commit.message | split(pat="\\n") | first | trim }} (`{{ commit.id | truncate(length=7, end="") }}`)
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = false
+filter_unconventional = false
+filter_commits = false
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-(?:rc\\.[0-9]+|dev\\.[0-9a-f]+))?$"
+ignore_tags = "^v[0-9]+\\.[0-9]+\\.[0-9]+-(?:rc|dev)\\."
+commit_parsers = [
+  { message = "^Merge pull request", skip = true },
+  { message = "^(feat|Add|Enable|Show|Support|Implement|Introduce)", group = "Features" },
+  { message = "^(fix|Fix|Prevent|Correct|Handle|Repair)", group = "Fixes" },
+  { message = "^(docs|Document|Update README)", group = "Documentation" },
+  { message = ".*", group = "Other changes" },
+]

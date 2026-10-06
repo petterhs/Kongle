@@ -1,5 +1,7 @@
 .embed.local.toml
 target
+dist/
+__pycache__/
 # Devenv
 .devenv*
 devenv.local.nix

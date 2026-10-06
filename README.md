@@ -139,6 +139,8 @@ past the bootloader watchdog timeout. These hardware checks are separate from CI
 
 Use feature branches and pull requests targeting `master`; the maintainer reviews and merges changes. Keep hardware results separate from build checks in PR descriptions. Run `cargo fmt --check`, `cargo clippy --locked --release --features mcuboot`, and both standalone and MCUBoot builds inside `devenv shell`. The lockfile pins the development environment; after upgrading the devenv CLI, `devenv update devenv` updates its modules without intentionally upgrading the other inputs.
 
+CI DFU packages, tagged release candidates, stable releases, and changelog generation are described in [Firmware builds and releases](docs/releases.md).
+
 ## Inspiration
 
 - [InfiniTime](https://github.com/InfiniTimeOrg/InfiniTime)

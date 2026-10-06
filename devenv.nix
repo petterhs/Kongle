@@ -9,6 +9,8 @@ in
   packages = [
     pkgs.git
     pkgs.gh
+    pkgs.git-cliff
+    pkgs.actionlint
     pkgs.openocd
     pkgs.gcc-arm-embedded-13
     pkgs.probe-rs-tools
