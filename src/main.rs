@@ -28,7 +28,7 @@ use embedded_graphics::{
     text::Text,
 };
 use heapless::String;
-use mipidsi::{models::ST7789, Builder};
+use mipidsi::Builder;
 use panic_probe as _;
 use static_cell::StaticCell;
 
@@ -297,7 +297,7 @@ async fn main(spawner: Spawner) {
     }
     let mut delay = BlockingDelay;
 
-    let mut display = Builder::new(ST7789, di)
+    let mut display = Builder::new(display_cfg::PineTimeSt7789, di)
         .display_size(display_cfg::DISPLAY_WIDTH, display_cfg::DISPLAY_HEIGHT)
         .display_offset(display_cfg::DISPLAY_OFFSET_X, display_cfg::DISPLAY_OFFSET_Y)
         .orientation(display_cfg::DISPLAY_ORIENTATION)

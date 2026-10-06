@@ -1,8 +1,72 @@
+use display_interface::WriteOnlyDataCommand;
 use embedded_graphics::{
     geometry::Point, geometry::Size, mono_font::MonoFont, primitives::Rectangle,
 };
 use embedded_graphics::{pixelcolor::Rgb565, prelude::RgbColor};
+use embedded_hal::{delay::DelayNs, digital::OutputPin};
 use mipidsi::options::{ColorInversion, ColorOrder, Orientation, Rotation};
+use mipidsi::{
+    dcs::{
+        BitsPerPixel, Dcs, EnterNormalMode, ExitSleepMode, PixelFormat, SetAddressMode,
+        SetDisplayOn, SetInvertMode, SetPixelFormat, SoftReset,
+    },
+    error::{Error, InitError},
+    models::{Model, ST7789},
+    options::ModelOptions,
+};
+
+/// ST7789 initialization shared by the PineTime's V2 and P3 controllers.
+///
+/// The upstream mipidsi 0.8 model sends Sleep Out before MADCTL and waits only
+/// 10 ms. On ST7789P3 this can leave the image rotated. Program the registers
+/// while asleep, then wait 120 ms after Sleep Out before turning the panel on.
+pub struct PineTimeSt7789;
+
+impl Model for PineTimeSt7789 {
+    type ColorFormat = Rgb565;
+    const FRAMEBUFFER_SIZE: (u16, u16) = (240, 320);
+
+    fn init<RST, DELAY, DI>(
+        &mut self,
+        dcs: &mut Dcs<DI>,
+        delay: &mut DELAY,
+        options: &ModelOptions,
+        rst: &mut Option<RST>,
+    ) -> Result<SetAddressMode, InitError<RST::Error>>
+    where
+        RST: OutputPin,
+        DELAY: DelayNs,
+        DI: WriteOnlyDataCommand,
+    {
+        let madctl = SetAddressMode::from(options);
+        match rst {
+            Some(rst) => self.hard_reset(rst, delay)?,
+            None => dcs.write_command(SoftReset)?,
+        }
+        delay.delay_us(150_000);
+
+        dcs.write_command(madctl)?;
+        dcs.write_command(SetInvertMode::new(options.invert_colors))?;
+        let pixel_format = PixelFormat::with_all(BitsPerPixel::from_rgb_color::<Rgb565>());
+        dcs.write_command(SetPixelFormat::new(pixel_format))?;
+
+        dcs.write_command(ExitSleepMode)?;
+        delay.delay_us(120_000);
+        dcs.write_command(EnterNormalMode)?;
+        delay.delay_us(10_000);
+        dcs.write_command(SetDisplayOn)?;
+        delay.delay_us(120_000);
+        Ok(madctl)
+    }
+
+    fn write_pixels<DI, I>(&mut self, dcs: &mut Dcs<DI>, colors: I) -> Result<(), Error>
+    where
+        DI: WriteOnlyDataCommand,
+        I: IntoIterator<Item = Self::ColorFormat>,
+    {
+        ST7789.write_pixels(dcs, colors)
+    }
+}
 
 pub const DISPLAY_WIDTH: u16 = 240;
 pub const DISPLAY_HEIGHT: u16 = 240;
