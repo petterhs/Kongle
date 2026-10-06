@@ -587,14 +587,15 @@ async fn main(spawner: Spawner) {
             }
             continue;
         }
-        if display.is_sleeping() {
+        let waking = display.is_sleeping();
+        if waking {
             display.wake(&mut DeferredDelay).unwrap();
             Timer::after(Duration::from_millis(120)).await;
-            backlight.set(7);
             redraw = true;
-            defmt::info!("Display awake");
         }
         if redraw {
+            // Keep the backlight dark until the full wake redraw has finished.
+            // Otherwise the clear and each text draw become visible in sequence.
             display.clear(display_cfg::BACKGROUND_COLOR).unwrap();
             let _ = Text::new(FIRMWARE_VERSION, version_pos, seconds_style).draw(&mut display);
             last_time = None;
@@ -630,6 +631,10 @@ async fn main(spawner: Spawner) {
             let text = update_text(last_ota);
             let _ = Text::new(&text, update_pos, update_style).draw(&mut display);
             redraw = false;
+            if waking {
+                backlight.set(7);
+                defmt::info!("Display awake");
+            }
         }
     }
 }
