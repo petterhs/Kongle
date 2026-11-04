@@ -6,7 +6,6 @@ mod current_time;
 mod device;
 mod dfu;
 mod flash;
-mod fonts;
 mod notifications;
 mod ota;
 mod touch;
