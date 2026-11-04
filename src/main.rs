@@ -24,7 +24,7 @@ use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_graphics::{
     mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
     prelude::*,
-    primitives::PrimitiveStyleBuilder,
+    primitives::{Line, PrimitiveStyle, PrimitiveStyleBuilder},
     text::Text,
 };
 use heapless::String;
@@ -67,6 +67,22 @@ fn update_text(status: UpdateStatus) -> String<22> {
         UpdateStatus::Failed => {
             let _ = text.push_str("Update failed");
         }
+    }
+    text
+}
+
+fn date_text(time: TimeState) -> String<16> {
+    const WEEKDAYS: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+    const MONTHS: [&str; 12] = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ];
+    let mut text = String::new();
+    if let Some(date) =
+        chrono::NaiveDate::from_ymd_opt(time.year as i32, time.month as u32, time.day as u32)
+    {
+        let weekday = WEEKDAYS[date.weekday().num_days_from_monday() as usize];
+        let month = MONTHS[date.month0() as usize];
+        let _ = write!(&mut text, "{} {:02} {}", weekday, time.day, month);
     }
     text
 }
@@ -362,11 +378,17 @@ async fn main(spawner: Spawner) {
         .text_color(display_cfg::TEXT_COLOR)
         .background_color(display_cfg::BACKGROUND_COLOR)
         .build();
+    let date_style = MonoTextStyleBuilder::new()
+        .font(seconds_font)
+        .text_color(display_cfg::ACCENT_COLOR)
+        .background_color(display_cfg::BACKGROUND_COLOR)
+        .build();
     let update_style = battery_style;
 
     let time_pos = Point::new(display_cfg::TIME_POS_X, display_cfg::TIME_POS_Y);
     let seconds_pos = Point::new(display_cfg::SECONDS_POS_X, display_cfg::SECONDS_POS_Y);
     let battery_pos = Point::new(display_cfg::BATTERY_POS_X, display_cfg::BATTERY_POS_Y);
+    let date_pos = Point::new(display_cfg::DATE_POS_X, display_cfg::DATE_POS_Y);
     let update_pos = Point::new(display_cfg::UPDATE_POS_X, display_cfg::UPDATE_POS_Y);
     let ble_pos = Point::new(display_cfg::BLE_POS_X, display_cfg::BLE_POS_Y);
     let version_pos = Point::new(display_cfg::VERSION_POS_X, display_cfg::VERSION_POS_Y);
@@ -375,12 +397,22 @@ async fn main(spawner: Spawner) {
         display_cfg::text_bounds(seconds_font, display_cfg::SECONDS_CHARS, seconds_pos);
     let battery_bounds =
         display_cfg::text_bounds(seconds_font, display_cfg::BATTERY_CHARS, battery_pos);
+    let date_bounds = display_cfg::text_bounds(seconds_font, display_cfg::DATE_CHARS, date_pos);
     let update_bounds =
         display_cfg::text_bounds(seconds_font, display_cfg::UPDATE_CHARS, update_pos);
     let ble_bounds = display_cfg::text_bounds(seconds_font, 1, ble_pos);
     let clear_style = PrimitiveStyleBuilder::new()
         .fill_color(display_cfg::BACKGROUND_COLOR)
         .build();
+    let date_divider = Line::new(
+        Point::new(display_cfg::DATE_POS_X, display_cfg::DATE_DIVIDER_Y),
+        Point::new(
+            display_cfg::DISPLAY_WIDTH as i32 - display_cfg::DATE_POS_X,
+            display_cfg::DATE_DIVIDER_Y,
+        ),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(display_cfg::ACCENT_COLOR, 2));
+    let _ = date_divider.draw(&mut display);
     let _ = Text::new(FIRMWARE_VERSION, version_pos, seconds_style).draw(&mut display);
 
     let charge_pin = Input::new(p.P0_12, Pull::Up);
@@ -492,6 +524,14 @@ async fn main(spawner: Spawner) {
                     continue;
                 }
                 if last_time
+                    .map(|t| (t.year, t.month, t.day) != (time.year, time.month, time.day))
+                    .unwrap_or(true)
+                {
+                    date_bounds.into_styled(clear_style).draw(&mut display).ok();
+                    let text = date_text(time);
+                    let _ = Text::new(&text, date_pos, date_style).draw(&mut display);
+                }
+                if last_time
                     .map(|t| t.hours != time.hours || t.minutes != time.minutes)
                     .unwrap_or(true)
                 {
@@ -597,6 +637,7 @@ async fn main(spawner: Spawner) {
             // Keep the backlight dark until the full wake redraw has finished.
             // Otherwise the clear and each text draw become visible in sequence.
             display.clear(display_cfg::BACKGROUND_COLOR).unwrap();
+            let _ = date_divider.draw(&mut display);
             let _ = Text::new(FIRMWARE_VERSION, version_pos, seconds_style).draw(&mut display);
             last_time = None;
             last_seconds = None;
@@ -605,6 +646,8 @@ async fn main(spawner: Spawner) {
                 let _ = Text::new("B", ble_pos, battery_style).draw(&mut display);
             }
             if let Some(time) = time_rx.try_get() {
+                let text = date_text(time);
+                let _ = Text::new(&text, date_pos, date_style).draw(&mut display);
                 let mut time_text: String<8> = String::new();
                 let _ = write!(&mut time_text, "{:02}:{:02}", time.hours, time.minutes);
                 let _ = Text::new(&time_text, time_pos, time_style).draw(&mut display);
