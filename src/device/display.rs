@@ -78,10 +78,16 @@ pub const DISPLAY_COLOR_INVERSION: ColorInversion = ColorInversion::Inverted;
 
 pub const BACKGROUND_COLOR: Rgb565 = Rgb565::BLACK;
 pub const TEXT_COLOR: Rgb565 = Rgb565::WHITE;
+pub const ACCENT_COLOR: Rgb565 = Rgb565::CYAN;
 
 pub const TIME_POS_X: i32 = 6;
 pub const TIME_POS_Y: i32 = 100;
 pub const TIME_CHARS: u32 = 5;
+
+pub const DATE_POS_X: i32 = 10;
+pub const DATE_POS_Y: i32 = 151;
+pub const DATE_CHARS: u32 = 10;
+pub const DATE_DIVIDER_Y: i32 = 122;
 
 pub const SECONDS_POS_X: i32 = 178;
 pub const SECONDS_POS_Y: i32 = 180;

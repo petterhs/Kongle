@@ -68,6 +68,9 @@ transfer wakes the display to show progress and keeps it awake through
 validation. Measure battery runtime on hardware before relying on this as a
 full low-power mode.
 
+The planned screen and menu architecture, input sequence, and graphics crate
+choices are recorded in [Watch UI direction](docs/ui.md).
+
 ## Two ways to run on dev kit with debugger
 
 - **Standalone (no bootloader)** – for rapid development: `cargo run --release` builds and flashes the firmware at `0x00000000`, replacing the bootloader if one is installed. Use this with the standalone debug workflow above.
