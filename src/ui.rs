@@ -69,6 +69,7 @@ pub struct WatchUi {
     last_time: Option<TimeState>,
     last_seconds: Option<u8>,
     last_battery: Option<BatteryState>,
+    skip_clear: bool,
 }
 
 impl WatchUi {
@@ -77,6 +78,7 @@ impl WatchUi {
             last_time: None,
             last_seconds: None,
             last_battery: None,
+            skip_clear: false,
         }
     }
 
@@ -113,10 +115,12 @@ impl WatchUi {
             .unwrap_or(true)
         {
             let pos = Point::new(cfg::DATE_POS_X, cfg::DATE_POS_Y);
-            cfg::text_bounds(&FONT_10X20, cfg::DATE_CHARS, pos)
-                .into_styled(clear_style)
-                .draw(display)
-                .ok();
+            if !self.skip_clear {
+                cfg::text_bounds(&FONT_10X20, cfg::DATE_CHARS, pos)
+                    .into_styled(clear_style)
+                    .draw(display)
+                    .ok();
+            }
             let style = MonoTextStyleBuilder::new()
                 .font(&FONT_10X20)
                 .text_color(cfg::ACCENT_COLOR)
@@ -131,10 +135,12 @@ impl WatchUi {
             .unwrap_or(true)
         {
             let pos = Point::new(cfg::TIME_POS_X, cfg::TIME_POS_Y);
-            cfg::text_bounds(&JETBRAINS_FONT_54_POINT_EXTRA_BOLD, cfg::TIME_CHARS, pos)
-                .into_styled(clear_style)
-                .draw(display)
-                .ok();
+            if !self.skip_clear {
+                cfg::text_bounds(&JETBRAINS_FONT_54_POINT_EXTRA_BOLD, cfg::TIME_CHARS, pos)
+                    .into_styled(clear_style)
+                    .draw(display)
+                    .ok();
+            }
             let style = MonoTextStyleBuilder::new()
                 .font(&JETBRAINS_FONT_54_POINT_EXTRA_BOLD)
                 .text_color(cfg::TEXT_COLOR)
@@ -146,10 +152,12 @@ impl WatchUi {
         }
         if self.last_seconds != Some(time.seconds) {
             let pos = Point::new(cfg::SECONDS_POS_X, cfg::SECONDS_POS_Y);
-            cfg::text_bounds(&FONT_10X20, cfg::SECONDS_CHARS, pos)
-                .into_styled(clear_style)
-                .draw(display)
-                .ok();
+            if !self.skip_clear {
+                cfg::text_bounds(&FONT_10X20, cfg::SECONDS_CHARS, pos)
+                    .into_styled(clear_style)
+                    .draw(display)
+                    .ok();
+            }
             let style = MonoTextStyleBuilder::new()
                 .font(&FONT_10X20)
                 .text_color(cfg::TEXT_COLOR)
@@ -175,10 +183,12 @@ impl WatchUi {
         let clear_style = PrimitiveStyleBuilder::new()
             .fill_color(cfg::BACKGROUND_COLOR)
             .build();
-        cfg::text_bounds(&FONT_10X20, cfg::BATTERY_CHARS, pos)
-            .into_styled(clear_style)
-            .draw(display)
-            .ok();
+        if !self.skip_clear {
+            cfg::text_bounds(&FONT_10X20, cfg::BATTERY_CHARS, pos)
+                .into_styled(clear_style)
+                .draw(display)
+                .ok();
+        }
         let mut text: String<16> = String::new();
         let charging = if state.charging { "+" } else { "" };
         let _ = write!(
@@ -203,10 +213,12 @@ impl WatchUi {
         let clear_style = PrimitiveStyleBuilder::new()
             .fill_color(cfg::BACKGROUND_COLOR)
             .build();
-        cfg::text_bounds(&FONT_10X20, 1, pos)
-            .into_styled(clear_style)
-            .draw(display)
-            .ok();
+        if !self.skip_clear {
+            cfg::text_bounds(&FONT_10X20, 1, pos)
+                .into_styled(clear_style)
+                .draw(display)
+                .ok();
+        }
         if connected {
             let style = MonoTextStyleBuilder::new()
                 .font(&FONT_10X20)
@@ -226,10 +238,12 @@ impl WatchUi {
         let clear_style = PrimitiveStyleBuilder::new()
             .fill_color(cfg::BACKGROUND_COLOR)
             .build();
-        cfg::text_bounds(&FONT_10X20, cfg::UPDATE_CHARS, pos)
-            .into_styled(clear_style)
-            .draw(display)
-            .ok();
+        if !self.skip_clear {
+            cfg::text_bounds(&FONT_10X20, cfg::UPDATE_CHARS, pos)
+                .into_styled(clear_style)
+                .draw(display)
+                .ok();
+        }
         let style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
             .text_color(cfg::TEXT_COLOR)
@@ -250,6 +264,9 @@ impl WatchUi {
         self.last_time = None;
         self.last_seconds = None;
         self.last_battery = None;
+        // The caller already cleared the entire panel while the backlight was
+        // off. Avoid filling each field a second time during wake.
+        self.skip_clear = true;
         self.draw_static(display);
         self.draw_connection(display, connected);
         if let Some(time) = time {
@@ -259,5 +276,6 @@ impl WatchUi {
             self.draw_battery(display, battery);
         }
         self.draw_update(display, status);
+        self.skip_clear = false;
     }
 }
