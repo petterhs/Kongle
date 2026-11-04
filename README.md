@@ -19,8 +19,8 @@ Kongle is an [Embassy](https://embassy.dev/)-based Rust firmware for the [PineTi
   - [ ] OTA updates (DFU)
 - [x] InfiniTime bootloader development support (MCUBoot boot and debugger flashing; BLE DFU and image confirmation remain incomplete)
 - [ ] Sleep mode and wake logic
-- [ ] Touch and gestures
-- [ ] Display menu and settings page
+- [x] Touch and gestures (development hardware validation pending)
+- [x] Basic launcher, notifications, settings, and About pages
 - [ ] Stopwatch
 - [ ] Alarms
 - [ ] Sensor services
@@ -70,6 +70,32 @@ full low-power mode.
 
 The planned screen and menu architecture, input sequence, and graphics crate
 choices are recorded in [Watch UI direction](docs/ui.md).
+
+### Touch navigation
+
+The CST816S touch controller is active while the screen is awake. From the
+clock, swipe up for Launcher, down for Notifications, right for Settings, or
+left for About. Swipe in the opposite direction to return. In Launcher, tap
+Settings or About. These pages currently provide basic navigation and status;
+notification history and editable settings are future work. A short button
+press still toggles the display, and a three-second hold restarts into the
+MCUBoot menu.
+
+The optional `touch-wake-debug` feature keeps touch scanning while the display
+is asleep, so a tap or swipe can wake a development watch with a stuck button.
+It is excluded from OTA firmware at compile time because its power use has not
+been measured. Flash a ST-Link development watch with:
+
+```bash
+KONGLE_FEATURES=mcuboot,touch-wake-debug bash scripts/flash_app.sh
+```
+
+This build does not accept OTA updates. To return to an OTA-capable build, flash
+with `KONGLE_FEATURES=mcuboot,ota-activation`. After flashing, use the MCUBoot
+RTT command below. Look for `Touch CST816S initialized`, `Touch gesture`, and
+`Touch wake` logs while checking all four swipe directions, taps, sleep/wake,
+and the button hold. Test this on the ST-Link development watch before using it
+on a closed device.
 
 ## Two ways to run on dev kit with debugger
 

@@ -13,33 +13,36 @@ default UI requirement.
 
 ## Screens and ownership
 
-Keep one owner of the display in the main application task. Other tasks publish
-data or events through the existing Embassy watches and channels. The UI owner
-will hold a small `Screen` enum (`Clock`, `Launcher`, `Settings`, `About`, and
-`Update`) and screen-local state such as menu selection. A fixed-capacity
-navigation stack is enough for returning to earlier screens; it cannot grow
-without bound. Use an enum and match-based dispatch first. A trait for every
-screen can be added if concrete screen implementations become unwieldy.
+The main application task owns the display. Other tasks publish data or events
+through Embassy watches and channels. The UI owns a `Page` enum (`Clock`,
+`Launcher`, `Notifications`, `Settings`, and `About`) and a fixed two-entry
+navigation stack. Screen transitions use match-based dispatch, without heap
+allocation or a trait object.
 
-Move drawing and its last-rendered values from `main.rs` into a `ui` module.
-The application task should translate clock, battery, BLE, OTA, button, and
-future touch events into UI state changes, then ask the active screen to draw.
-On a screen transition or wake, clear and draw the new screen while the
-backlight is off. Within a screen, invalidate only changed fields: for
-example, seconds each tick, the date at midnight, battery when sampled, and
-BLE state on connection changes. OTA progress is a separate UI state; a
-transfer percentage must not imply that image validation or activation passed.
+Drawing and last-rendered values live in `src/ui.rs`. The application task
+translates clock, battery, BLE, OTA, button, and touch events into UI state
+changes. On a screen transition or wake, it clears and draws while the
+backlight is off. On the clock page, it redraws only changed fields. OTA
+activity returns to the clock so progress remains visible; a transfer
+percentage does not imply that validation or activation passed.
 
 ## Input order
 
-The current touch implementation in `src/device/input.rs` is a placeholder and
-never produces events. Preserve the present button behavior: short press
-toggles the display, and a three-second hold restarts into the bootloader menu
-on MCUBoot builds. Implement and hardware-test the PineTime touch controller
-before making a launcher or settings screen the main navigation path. Normalize
-touch samples into tap and swipe events at the driver boundary, then route them
-through the screen state machine. A button press can act as Back when a page is
-open, after that behavior has been reviewed on hardware.
+`src/device/input.rs` configures the PineTime CST816S on TWIM1 and reads its
+interrupt-driven gesture reports. `src/touch.rs` decodes taps and all four
+swipes independently of hardware; `src/ui/navigation.rs` routes them between
+pages. From the clock, up opens Launcher, down Notifications, right Settings,
+and left About. The reverse swipe returns. Launcher taps open Settings or
+About. Short button press toggles the display; a three-second hold restarts
+into the bootloader menu on MCUBoot builds. These inputs need validation on
+the ST-Link watch before using this firmware on a closed watch.
+
+By default, touch scanning stops when the display sleeps, then the controller
+is reset and reinitialized after button wake. The `touch-wake-debug` feature
+keeps scanning and wakes on a touch report. It cannot be combined with
+`ota-staging` or `ota-activation`, so OTA packages cannot include it. Measure
+its battery cost on the development watch before deciding whether a lower
+power touch-wake mode should be offered to daily-driver devices.
 
 ## Dependency choices
 
@@ -61,17 +64,27 @@ open, after that behavior has been reviewed on hardware.
   rendering, but its bare-metal setup requires an allocator and a platform
   integration; it is a larger change than Kongle currently needs.
 
-## Review sequence
+## Visual direction to decide next
 
-1. Extract the existing clock drawing into a UI module without changing its
-   appearance or sleep behavior. Keep the watch-face date work in this PR
-   independent of that refactor.
-2. Add the touch driver and a small host-tested input-to-navigation state
-   machine. Test tap, swipes, wake, and bootloader hold on the development
-   watch. Keep the daily driver on a known-good build until this is stable.
-3. Add the launcher and About screen; then settings and notifications. Measure
-   flash size and static RAM on every firmware PR, and use host-rendered
-   previews for layout review where useful.
+- A seven-segment clock face is closest to a classic Casio LCD. The
+  [`eg-seven-segment`](https://docs.rs/eg-seven-segment/0.2.0/eg_seven_segment/)
+  crate draws scalable digits with `embedded-graphics` 0.8. A first prototype
+  should draw `HH:MM` into the existing clock rectangle, then compare flash
+  size and redraw time on hardware.
+- A compact pixel font from `embedded-graphics` provides a dot-matrix look
+  with no new crate. This is appropriate for small labels and a more restrained
+  clock face.
+- A custom bitmap font can recreate a specific bedside alarm-clock display,
+  but it needs a licensed source font and a host conversion step. Keep its
+  glyphs limited to digits and punctuation to control flash use.
+
+For icons, draw the battery and BLE status directly with `embedded-graphics`
+primitives; these are small and easy to theme. If the launcher needs a larger
+set, [`embedded-iconoir`](https://docs.rs/embedded-iconoir/0.2.3/embedded_iconoir/)
+offers icons compatible with `embedded-graphics` 0.8 and compiles only the
+selected assets. Review icon legibility at 16 or 24 pixels on the watch before
+adding a whole set. Host-rendered PNG previews can help choose a direction,
+but the actual ST7789 display should decide colors and sizes.
 
 References: [embedded-graphics](https://docs.rs/embedded-graphics/0.8.2/embedded_graphics/),
 [embedded-layout](https://docs.rs/embedded-layout/0.4.2/embedded_layout/),

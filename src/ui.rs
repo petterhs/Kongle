@@ -1,6 +1,8 @@
 //! Clock-screen rendering. The application task owns the display and forwards
 //! state changes here; BLE, input, and OTA tasks never draw directly.
 
+mod navigation;
+
 use core::fmt::Write;
 
 use chrono::Datelike;
@@ -17,8 +19,10 @@ use crate::{
     device::{battery::BatteryState, display as cfg},
     fonts::JETBRAINS_FONT_54_POINT_EXTRA_BOLD,
     ota::UpdateStatus,
+    touch::TouchEvent,
     TimeState, FIRMWARE_VERSION,
 };
+use navigation::{Navigation, Page};
 
 fn update_text(status: UpdateStatus) -> String<22> {
     let mut text = String::new();
@@ -66,6 +70,7 @@ fn date_text(time: TimeState) -> String<16> {
 }
 
 pub struct WatchUi {
+    navigation: Navigation,
     last_time: Option<TimeState>,
     last_seconds: Option<u8>,
     last_battery: Option<BatteryState>,
@@ -75,11 +80,21 @@ pub struct WatchUi {
 impl WatchUi {
     pub const fn new() -> Self {
         Self {
+            navigation: Navigation::new(),
             last_time: None,
             last_seconds: None,
             last_battery: None,
             skip_clear: false,
         }
+    }
+
+    pub fn handle_touch(&mut self, event: TouchEvent) -> bool {
+        self.navigation.handle(event)
+    }
+
+    /// OTA progress must remain visible even if another page was open.
+    pub fn show_clock(&mut self) -> bool {
+        self.navigation.clock()
     }
 
     pub fn draw_static<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
@@ -106,6 +121,9 @@ impl WatchUi {
     }
 
     pub fn draw_time<D: DrawTarget<Color = Rgb565>>(&mut self, display: &mut D, time: TimeState) {
+        if self.navigation.page() != Page::Clock {
+            return;
+        }
         let clear_style = PrimitiveStyleBuilder::new()
             .fill_color(cfg::BACKGROUND_COLOR)
             .build();
@@ -176,6 +194,9 @@ impl WatchUi {
         display: &mut D,
         state: BatteryState,
     ) {
+        if self.navigation.page() != Page::Clock {
+            return;
+        }
         if self.last_battery == Some(state) {
             return;
         }
@@ -234,6 +255,9 @@ impl WatchUi {
         display: &mut D,
         status: UpdateStatus,
     ) {
+        if self.navigation.page() != Page::Clock {
+            return;
+        }
         let pos = Point::new(cfg::UPDATE_POS_X, cfg::UPDATE_POS_Y);
         let clear_style = PrimitiveStyleBuilder::new()
             .fill_color(cfg::BACKGROUND_COLOR)
@@ -267,6 +291,12 @@ impl WatchUi {
         // The caller already cleared the entire panel while the backlight was
         // off. Avoid filling each field a second time during wake.
         self.skip_clear = true;
+        if self.navigation.page() != Page::Clock {
+            self.draw_page(display);
+            self.draw_connection(display, connected);
+            self.skip_clear = false;
+            return;
+        }
         self.draw_static(display);
         self.draw_connection(display, connected);
         if let Some(time) = time {
@@ -277,5 +307,50 @@ impl WatchUi {
         }
         self.draw_update(display, status);
         self.skip_clear = false;
+    }
+
+    fn draw_page<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+        let (title, hint) = match self.navigation.page() {
+            Page::Clock => return,
+            Page::Launcher => ("LAUNCHER", "Swipe down: clock"),
+            Page::Notifications => ("NOTIFICATIONS", "Swipe up: clock"),
+            Page::Settings => ("SETTINGS", "Swipe left: back"),
+            Page::About => ("ABOUT", "Swipe right: back"),
+        };
+        let style = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(cfg::TEXT_COLOR)
+            .background_color(cfg::BACKGROUND_COLOR)
+            .build();
+        let accent = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(cfg::ACCENT_COLOR)
+            .background_color(cfg::BACKGROUND_COLOR)
+            .build();
+        let x = ((cfg::DISPLAY_WIDTH as i32 - title.len() as i32 * 10) / 2).max(0);
+        let _ = Text::new(title, Point::new(x, 42), accent).draw(display);
+        let _ = Text::new(hint, Point::new(10, 220), style).draw(display);
+        match self.navigation.page() {
+            Page::Launcher => {
+                let _ = Text::new("SETTINGS", Point::new(20, 110), style).draw(display);
+                let _ = Text::new("ABOUT", Point::new(20, 165), style).draw(display);
+            }
+            Page::Notifications => {
+                let _ = Text::new("No notifications", Point::new(20, 110), style).draw(display);
+            }
+            Page::Settings => {
+                let wake = if cfg!(feature = "touch-wake-debug") {
+                    "Touch wake: debug"
+                } else {
+                    "Touch wake: off"
+                };
+                let _ = Text::new(wake, Point::new(20, 110), style).draw(display);
+            }
+            Page::About => {
+                let _ = Text::new("Kongle", Point::new(20, 110), style).draw(display);
+                let _ = Text::new(FIRMWARE_VERSION, Point::new(20, 145), style).draw(display);
+            }
+            Page::Clock => {}
+        }
     }
 }

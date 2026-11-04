@@ -4,8 +4,12 @@
 mod current_time;
 #[path = "../../../src/device/display.rs"]
 mod display;
+#[path = "../../../src/ui/navigation.rs"]
+mod navigation;
 #[path = "../../../src/ota.rs"]
 mod ota;
+#[path = "../../../src/touch.rs"]
+mod touch;
 
 #[cfg(test)]
 mod tests {
@@ -23,6 +27,49 @@ mod tests {
         cell::{Cell, RefCell},
         rc::Rc,
     };
+
+    #[test]
+    fn touch_decoder_keeps_swipes_when_release_has_no_coordinates() {
+        assert_eq!(
+            touch::decode([0x02, 0, 0xff, 0xff, 0xff, 0xff]),
+            Some(touch::TouchEvent::SwipeUp)
+        );
+        assert_eq!(
+            touch::decode([0x05, 0, 0, 100, 0, 120]),
+            Some(touch::TouchEvent::Tap { x: 100, y: 120 })
+        );
+        assert_eq!(touch::decode([0x05, 0, 0, 240, 0, 120]), None);
+        assert_eq!(
+            touch::decode([0x00, 1, 0, 100, 0, 120]),
+            Some(touch::TouchEvent::Contact)
+        );
+    }
+
+    #[test]
+    fn navigation_uses_four_clock_swipes_and_bounded_return_stack() {
+        use navigation::{Navigation, Page};
+        use touch::TouchEvent::*;
+
+        let mut nav = Navigation::new();
+        assert!(nav.handle(SwipeUp));
+        assert_eq!(nav.page(), Page::Launcher);
+        assert!(nav.handle(Tap { x: 20, y: 100 }));
+        assert_eq!(nav.page(), Page::Settings);
+        assert!(nav.handle(SwipeLeft));
+        assert_eq!(nav.page(), Page::Launcher);
+        assert!(nav.handle(SwipeDown));
+        assert_eq!(nav.page(), Page::Clock);
+        assert!(nav.handle(SwipeDown));
+        assert_eq!(nav.page(), Page::Notifications);
+        assert!(nav.handle(SwipeUp));
+        assert!(nav.handle(SwipeRight));
+        assert_eq!(nav.page(), Page::Settings);
+        assert!(nav.handle(SwipeLeft));
+        assert!(nav.handle(SwipeLeft));
+        assert_eq!(nav.page(), Page::About);
+        assert!(nav.clock());
+        assert_eq!(nav.page(), Page::Clock);
+    }
 
     #[test]
     fn pinetime_display_programs_orientation_before_sleep_out() {
