@@ -23,7 +23,6 @@ use embassy_nrf::saadc;
 use embassy_nrf::spim::{Config as SpimConfig, Frequency, Spim, MODE_3};
 use embassy_nrf::{
     gpio::{Input, Level, Output, OutputDrive, Pull},
-    gpiote::{InputChannel, InputChannelPolarity},
     twim::{Config as TwimConfig, Twim},
 };
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
@@ -342,12 +341,7 @@ async fn main(spawner: Spawner) {
             touch_config,
             TOUCH_TX_BUFFER.init([0; 8]),
         ),
-        InputChannel::new(
-            p.GPIOTE_CH0,
-            p.P0_28,
-            Pull::Up,
-            InputChannelPolarity::HiToLo,
-        ),
+        Input::new(p.P0_28, Pull::Up),
         Output::new(p.P0_10, Level::High, OutputDrive::Standard),
     );
 

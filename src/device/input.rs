@@ -2,7 +2,6 @@ use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
 use defmt::Format;
 use embassy_nrf::{
     gpio::{Input, Output},
-    gpiote::InputChannel,
     twim::{self, Twim},
 };
 use embassy_time::{Duration, Timer};
@@ -59,14 +58,14 @@ impl<'d> Button<'d> {
 /// gesture and registers 0x03..0x06 report its position.
 pub struct TouchScreen<'d> {
     twim: Twim<'d>,
-    irq: InputChannel<'d>,
+    irq: Input<'d>,
     reset: Output<'d>,
 }
 
 impl<'d> TouchScreen<'d> {
     const ADDRESS: u8 = 0x15;
 
-    pub fn new(twim: Twim<'d>, irq: InputChannel<'d>, reset: Output<'d>) -> Self {
+    pub fn new(twim: Twim<'d>, irq: Input<'d>, reset: Output<'d>) -> Self {
         Self { twim, irq, reset }
     }
 
@@ -106,7 +105,10 @@ impl<'d> TouchScreen<'d> {
     }
 
     pub async fn next(&mut self) -> Result<Option<TouchEvent>, twim::Error> {
-        self.irq.wait().await;
+        // Use the pin's level-sensitive PORT event. The dedicated GPIOTE
+        // channel wait path panicked after a gesture on the development watch.
+        // Checking the level also catches an IRQ that arrived before we wait.
+        self.irq.wait_for_low().await;
         let register = [0x01];
         let mut frame = [0; 6];
         self.twim
