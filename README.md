@@ -60,7 +60,9 @@ reset (`Kongle started` appears again). Closed watches have no RTT access.
 
 The clock face shows 24-pixel battery-level and Bluetooth icons. Battery
 percentage is shown by default; tap its row in Settings to toggle it for the
-current session. The About page shows the firmware
+current session. Settings also offers Low, Medium, and High backlight levels;
+tap a level to preview it. Brightness defaults to High and resets on reboot.
+The About page shows the firmware
 version, short build commit, battery percentage, and voltage. The firmware
 version is also available through the standard BLE Device Information Service
 (Firmware Revision String). The display and backlight sleep after 30 seconds of

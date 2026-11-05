@@ -155,10 +155,36 @@ fn date_text(time: TimeState) -> String<16> {
     text
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Brightness {
+    Low,
+    Medium,
+    High,
+}
+
+impl Brightness {
+    const fn backlight_level(self) -> u8 {
+        match self {
+            Self::Low => 1,
+            Self::Medium => 3,
+            Self::High => 7,
+        }
+    }
+
+    const fn from_touch_x(x: u8) -> Self {
+        match x {
+            0..=79 => Self::Low,
+            80..=159 => Self::Medium,
+            _ => Self::High,
+        }
+    }
+}
+
 pub struct WatchUi {
     navigation: Navigation,
     notifications: Inbox,
     show_battery_percent: bool,
+    brightness: Brightness,
     last_time: Option<TimeState>,
     last_battery: Option<BatteryState>,
     skip_clear: bool,
@@ -170,6 +196,7 @@ impl WatchUi {
             navigation: Navigation::new(),
             notifications: Inbox::new(),
             show_battery_percent: true,
+            brightness: Brightness::High,
             last_time: None,
             last_battery: None,
             skip_clear: false,
@@ -182,6 +209,14 @@ impl WatchUi {
                 TouchEvent::SwipeLeft => return self.notifications.older(),
                 TouchEvent::SwipeRight => return self.notifications.newer(),
                 _ => {}
+            }
+        }
+        if self.navigation.page() == Page::Settings {
+            if let TouchEvent::Tap { x, y: 132..=190 } = event {
+                let next = Brightness::from_touch_x(x);
+                let changed = self.brightness != next;
+                self.brightness = next;
+                return changed;
             }
         }
         if self.navigation.page() == Page::Settings
@@ -198,6 +233,10 @@ impl WatchUi {
         if show {
             self.navigation.notifications();
         }
+    }
+
+    pub const fn brightness_level(&self) -> u8 {
+        self.brightness.backlight_level()
     }
 
     /// OTA progress must remain visible even if another page was open.
@@ -465,12 +504,22 @@ impl WatchUi {
                     .into_styled(PrimitiveStyle::with_stroke(cfg::ACCENT_COLOR, 1));
                 let _ = row.draw(display);
                 let _ = Text::new(battery, Point::new(20, 105), style).draw(display);
-                let wake = if cfg!(feature = "touch-wake-debug") {
-                    "Touch wake: debug"
-                } else {
-                    "Touch wake: off"
-                };
-                let _ = Text::new(wake, Point::new(20, 165), style).draw(display);
+                let brightness_row = Rectangle::new(Point::new(10, 132), Size::new(220, 59))
+                    .into_styled(PrimitiveStyle::with_stroke(cfg::ACCENT_COLOR, 1));
+                let _ = brightness_row.draw(display);
+                let _ = Text::new("Brightness", Point::new(20, 157), style).draw(display);
+                for (label, x, preset) in [
+                    ("LOW", 20, Brightness::Low),
+                    ("MED", 91, Brightness::Medium),
+                    ("HIGH", 161, Brightness::High),
+                ] {
+                    let selected_style = if self.brightness == preset {
+                        accent
+                    } else {
+                        style
+                    };
+                    let _ = Text::new(label, Point::new(x, 182), selected_style).draw(display);
+                }
             }
             Page::About => {
                 let _ = Text::new("Kongle", Point::new(20, 110), style).draw(display);

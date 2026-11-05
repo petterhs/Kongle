@@ -655,7 +655,7 @@ async fn main(spawner: Spawner) {
             );
             redraw = false;
             SCREEN_AWAKE_WATCH.sender().send(true);
-            backlight.set(7);
+            backlight.set(watch_ui.brightness_level());
             if waking {
                 defmt::info!("Display awake");
             }
