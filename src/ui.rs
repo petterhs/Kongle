@@ -106,7 +106,7 @@ fn clock_digits() -> SevenSegmentStyle<Rgb565> {
         .digit_spacing(6)
         .segment_width(7)
         .segment_color(cfg::TEXT_COLOR)
-        .inactive_segment_color(Rgb565::new(3, 6, 6))
+        .inactive_segment_color(Rgb565::new(1, 2, 1))
         .build()
 }
 
