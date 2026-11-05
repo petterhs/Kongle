@@ -239,6 +239,41 @@ impl WatchUi {
         self.brightness.backlight_level()
     }
 
+    /// Refresh only the selected brightness labels while the backlight stays on.
+    pub fn draw_brightness_selection<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+        if self.navigation.page() != Page::Settings {
+            return;
+        }
+        if !self.skip_clear {
+            let clear = PrimitiveStyle::with_fill(cfg::BACKGROUND_COLOR);
+            let _ = Rectangle::new(Point::new(16, 163), Size::new(208, 27))
+                .into_styled(clear)
+                .draw(display);
+        }
+        let style = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(cfg::TEXT_COLOR)
+            .background_color(cfg::BACKGROUND_COLOR)
+            .build();
+        let accent = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(cfg::ACCENT_COLOR)
+            .background_color(cfg::BACKGROUND_COLOR)
+            .build();
+        for (label, x, preset) in [
+            ("LOW", 20, Brightness::Low),
+            ("MED", 91, Brightness::Medium),
+            ("HIGH", 161, Brightness::High),
+        ] {
+            let selected_style = if self.brightness == preset {
+                accent
+            } else {
+                style
+            };
+            let _ = Text::new(label, Point::new(x, 182), selected_style).draw(display);
+        }
+    }
+
     /// OTA progress must remain visible even if another page was open.
     pub fn show_clock(&mut self) -> bool {
         self.navigation.clock()
@@ -508,18 +543,7 @@ impl WatchUi {
                     .into_styled(PrimitiveStyle::with_stroke(cfg::ACCENT_COLOR, 1));
                 let _ = brightness_row.draw(display);
                 let _ = Text::new("Brightness", Point::new(20, 157), style).draw(display);
-                for (label, x, preset) in [
-                    ("LOW", 20, Brightness::Low),
-                    ("MED", 91, Brightness::Medium),
-                    ("HIGH", 161, Brightness::High),
-                ] {
-                    let selected_style = if self.brightness == preset {
-                        accent
-                    } else {
-                        style
-                    };
-                    let _ = Text::new(label, Point::new(x, 182), selected_style).draw(display);
-                }
+                self.draw_brightness_selection(display);
             }
             Page::About => {
                 let _ = Text::new("Kongle", Point::new(20, 110), style).draw(display);
