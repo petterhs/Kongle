@@ -14,7 +14,10 @@ use static_cell::StaticCell;
 use trouble_host::prelude::DefaultPacketPool;
 use trouble_host::prelude::*;
 
-use crate::{current_time::parse_cts, dfu, flash::Flash, TimeState, FIRMWARE_VERSION};
+use crate::{
+    current_time::parse_cts, dfu, flash::Flash, notifications, notifications::Notification,
+    TimeState, FIRMWARE_VERSION,
+};
 use embedded_hal::spi::SpiDevice;
 
 /// Max number of connections
@@ -35,6 +38,14 @@ struct Server {
     // Append new services so existing CTS/DFU handles remain stable for
     // Android's cached GATT database at Kongle's persistent BLE address.
     device_information: DeviceInformationService,
+    alert_notification: AlertNotificationService,
+}
+
+/// Furu writes InfiniTime-compatible New Alert payloads here.
+#[gatt_service(uuid = "00001811-0000-1000-8000-00805f9b34fb")]
+struct AlertNotificationService {
+    #[characteristic(uuid = "00002a46-0000-1000-8000-00805f9b34fb", write)]
+    new_alert: heapless09::Vec<u8, 103>,
 }
 
 /// Standard Device Information Service. Furu reads Firmware Revision from it.
@@ -94,6 +105,7 @@ pub async fn run<C, S>(
     time_rx: Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
     connected_tx: WatchSender<'static, CriticalSectionRawMutex, bool, 2>,
+    notification_tx: Sender<'static, CriticalSectionRawMutex, Notification, 2>,
     mut flash: Flash<S>,
 ) where
     C: Controller + 'static,
@@ -148,6 +160,7 @@ pub async fn run<C, S>(
                                     &conn,
                                     &mut time_rx,
                                     &set_time_tx,
+                                    &notification_tx,
                                     &mut flash,
                                 )
                                 .await;
@@ -189,6 +202,7 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
     conn: &GattConnection<'_, '_, P>,
     time_rx: &mut Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: &Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
+    notification_tx: &Sender<'static, CriticalSectionRawMutex, Notification, 2>,
     flash: &mut Flash<S>,
 ) {
     let mut dfu = dfu::Receiver::new(flash);
@@ -227,6 +241,23 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                                         .map(|_| AttErrorCode::INSUFFICIENT_RESOURCES)
                                 } else {
                                     Some(AttErrorCode::VALUE_NOT_ALLOWED)
+                                }
+                            }
+                            GattEvent::Write(write)
+                                if write.handle() == server.alert_notification.new_alert.handle =>
+                            {
+                                match notifications::parse_new_alert(write.data()) {
+                                    Ok(notification) => {
+                                        defmt::info!("[ans] new alert received");
+                                        notification_tx
+                                            .try_send(notification)
+                                            .err()
+                                            .map(|_| AttErrorCode::INSUFFICIENT_RESOURCES)
+                                    }
+                                    Err(_) => {
+                                        defmt::warn!("[ans] invalid alert");
+                                        Some(AttErrorCode::VALUE_NOT_ALLOWED)
+                                    }
                                 }
                             }
                             GattEvent::Write(write)

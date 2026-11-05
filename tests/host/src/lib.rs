@@ -6,6 +6,8 @@ mod current_time;
 mod display;
 #[path = "../../../src/ui/navigation.rs"]
 mod navigation;
+#[path = "../../../src/notifications.rs"]
+mod notifications;
 #[path = "../../../src/ota.rs"]
 mod ota;
 #[path = "../../../src/touch.rs"]
@@ -14,6 +16,41 @@ mod touch;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alert_inbox_accepts_furu_payload_and_keeps_four_newest() {
+        let first = notifications::parse_new_alert(b"\0\x01\0Mail\0Hello from Furu").unwrap();
+        assert_eq!(first.title.as_str(), "Mail");
+        assert_eq!(first.body.as_str(), "Hello from Furu");
+        let mut inbox = notifications::Inbox::new();
+        inbox.push(first);
+        for number in 1..=4 {
+            let payload = [0, 1, 0, b'0' + number, 0, b'x'];
+            inbox.push(notifications::parse_new_alert(&payload).unwrap());
+        }
+        assert_eq!(inbox.count(), 4);
+        assert_eq!(inbox.selected().unwrap().title.as_str(), "4");
+        assert!(inbox.older());
+        assert!(inbox.older());
+        assert!(inbox.older());
+        assert_eq!(inbox.selected().unwrap().title.as_str(), "1");
+        assert!(!inbox.older());
+        assert!(inbox.newer());
+    }
+
+    #[test]
+    fn malformed_alerts_are_rejected_and_utf8_boundary_is_safe() {
+        assert_eq!(
+            notifications::parse_new_alert(b"\0\x01\0no separator"),
+            Err(notifications::ParseError::MissingSeparator)
+        );
+        assert_eq!(
+            notifications::parse_new_alert(b"\0\0\0A\0B"),
+            Err(notifications::ParseError::InvalidHeader)
+        );
+        let alert = notifications::parse_new_alert(b"\0\x01\0A\0hello\xc3").unwrap();
+        assert_eq!(alert.body.as_str(), "hello");
+    }
     use display_interface::{DataFormat, DisplayError, WriteOnlyDataCommand};
     use embedded_graphics::{
         mono_font::{ascii::FONT_10X20, MonoTextStyle},

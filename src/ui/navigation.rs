@@ -37,6 +37,12 @@ impl Navigation {
         changed
     }
 
+    pub fn notifications(&mut self) {
+        self.page = Page::Notifications;
+        self.stack[0] = Page::Clock;
+        self.depth = 1;
+    }
+
     fn open(&mut self, page: Page) -> bool {
         if self.page == page || self.depth == self.stack.len() {
             return false;

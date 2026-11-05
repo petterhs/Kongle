@@ -13,7 +13,7 @@ Kongle is an [Embassy](https://embassy.dev/)-based Rust firmware for the [PineTi
   - [x] Simple time sync
   - [ ] Battery reporting
   - [ ] Steps
-  - [ ] Notifications
+  - [x] Notifications (volatile four-alert inbox through Furu)
   - [ ] Heartbeat sensor
   - [ ] Music Service
   - [ ] OTA updates (DFU)
@@ -80,8 +80,14 @@ The CST816S touch controller is active while the screen is awake. From the
 clock, swipe up for Launcher, down for Notifications, right for Settings, or
 left for About. Swipe down to go back from Launcher, Settings, or About; swipe
 up to return from Notifications. In Launcher, tap Settings or About. These pages
-provide basic navigation and status; notification history and persistent
-settings are future work. A short button
+provide basic navigation and status. Furu can forward Android alerts to Kongle's
+Alert Notification Service (New Alert, 0x2A46). A new alert wakes the display
+and opens the Notifications page for 30 seconds, except during OTA. Swipe left
+for older alerts, right for newer alerts, or up to return to the clock. The
+inbox holds the four newest alerts in RAM and clears on reboot. Notification
+content is clipped to the screen and non-ASCII characters display as `?`.
+Enable notification access and forwarding for the Kongle device in Furu.
+Persistent settings are future work. A short button
 press still toggles the display, and a three-second hold restarts into the
 MCUBoot menu.
 

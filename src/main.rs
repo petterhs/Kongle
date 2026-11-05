@@ -7,6 +7,7 @@ mod device;
 mod dfu;
 mod flash;
 mod fonts;
+mod notifications;
 mod ota;
 mod touch;
 mod ui;
@@ -88,6 +89,8 @@ static TIME_WATCH: Watch<CriticalSectionRawMutex, TimeState, 2> = Watch::new();
 static BATTERY_WATCH: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
 static BLE_CONNECTED_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
 static INPUT_CH: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new();
+static NOTIFICATION_CH: Channel<CriticalSectionRawMutex, notifications::Notification, 2> =
+    Channel::new();
 static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 1> = Watch::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
 static TOUCH_TX_BUFFER: StaticCell<[u8; 8]> = StaticCell::new();
@@ -282,6 +285,12 @@ async fn ble_peripheral_task(
     address: [u8; 6],
     time_rx: embassy_sync::watch::Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
+    notification_tx: embassy_sync::channel::Sender<
+        'static,
+        CriticalSectionRawMutex,
+        notifications::Notification,
+        2,
+    >,
     flash: flash::Flash<FlashSpi>,
 ) {
     ble::run(
@@ -290,6 +299,7 @@ async fn ble_peripheral_task(
         time_rx,
         set_time_tx,
         BLE_CONNECTED_WATCH.sender(),
+        notification_tx,
         flash,
     )
     .await
@@ -457,6 +467,7 @@ async fn main(spawner: Spawner) {
             address,
             time_rx_ble,
             SET_TIME_CH.sender(),
+            NOTIFICATION_CH.sender(),
             flash,
         ))
         .unwrap();
@@ -468,6 +479,7 @@ async fn main(spawner: Spawner) {
     let mut ota_rx = OTA_WATCH.receiver().unwrap();
     let mut ble_rx = BLE_CONNECTED_WATCH.receiver().unwrap();
     let input_rx = INPUT_CH.receiver();
+    let notification_rx = NOTIFICATION_CH.receiver();
 
     let mut last_ota = UpdateStatus::Idle;
     let mut ble_connected = false;
@@ -481,7 +493,13 @@ async fn main(spawner: Spawner) {
                 time_rx.changed(),
                 embassy_futures::select::select(
                     battery_rx.changed(),
-                    embassy_futures::select::select(input_rx.receive(), ble_rx.changed()),
+                    embassy_futures::select::select(
+                        input_rx.receive(),
+                        embassy_futures::select::select(
+                            ble_rx.changed(),
+                            notification_rx.receive(),
+                        ),
+                    ),
                 ),
             ),
         )
@@ -568,7 +586,7 @@ async fn main(spawner: Spawner) {
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
                 embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
-                    connected,
+                    embassy_futures::select::Either::First(connected),
                 )),
             )) => {
                 ble_connected = connected;
@@ -576,6 +594,25 @@ async fn main(spawner: Spawner) {
                     continue;
                 }
                 watch_ui.draw_connection(&mut display, connected);
+            }
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                    embassy_futures::select::Either::Second(notification),
+                )),
+            )) => {
+                let show = !matches!(
+                    last_ota,
+                    UpdateStatus::Erasing
+                        | UpdateStatus::Receiving { .. }
+                        | UpdateStatus::Validating
+                );
+                watch_ui.receive_notification(notification, show);
+                defmt::info!("[ans] notification stored; preview={}", show);
+                if show {
+                    awake = true;
+                    redraw = true;
+                    sleep_at = Instant::now() + Duration::from_secs(30);
+                }
             }
         }
         if awake
