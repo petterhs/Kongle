@@ -12,6 +12,28 @@ pub enum TouchEvent {
     SwipeRight,
 }
 
+/// The controller can report the same gesture again shortly after release.
+/// Keep this independent of the clock so the timing can be host-tested.
+pub struct GestureDebouncer {
+    last: Option<(TouchEvent, u64)>,
+}
+
+impl GestureDebouncer {
+    pub const fn new() -> Self {
+        Self { last: None }
+    }
+
+    pub fn accept(&mut self, event: TouchEvent, now_ms: u64) -> bool {
+        const REPEAT_WINDOW_MS: u64 = 350;
+        let repeated = self
+            .last
+            .map(|(last, at)| last == event && now_ms.saturating_sub(at) < REPEAT_WINDOW_MS)
+            .unwrap_or(false);
+        self.last = Some((event, now_ms));
+        !repeated
+    }
+}
+
 /// Registers 0x01..=0x06. Gestures are reported by the controller; position
 /// is only trusted for taps because release/gesture frames can lack a point.
 pub fn decode(frame: [u8; 6]) -> Option<TouchEvent> {

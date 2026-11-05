@@ -107,7 +107,9 @@ impl<'d> TouchScreen<'d> {
     pub async fn next(&mut self) -> Result<Option<TouchEvent>, twim::Error> {
         // Use the pin's level-sensitive PORT event. The dedicated GPIOTE
         // channel wait path panicked after a gesture on the development watch.
-        // Checking the level also catches an IRQ that arrived before we wait.
+        // The CST816S can hold IRQ low after a read. Require it to return high
+        // before accepting another low; otherwise one swipe is read repeatedly.
+        self.irq.wait_for_high().await;
         self.irq.wait_for_low().await;
         let register = [0x01];
         let mut frame = [0; 6];

@@ -58,8 +58,11 @@ with the host's reason, and advertising restart. On a development board,
 capture RTT alongside Android logcat to distinguish link loss from a watch
 reset (`Kongle started` appears again). Closed watches have no RTT access.
 
-The firmware version and short build commit appear to the left of the seconds
-counter, and are available through the standard BLE Device Information Service
+The clock face shows 24-pixel battery-level and Bluetooth icons. Battery
+percentage is shown by default; tap its row in Settings to toggle it for the
+current session. The About page shows the firmware
+version, short build commit, battery percentage, and voltage. The firmware
+version is also available through the standard BLE Device Information Service
 (Firmware Revision String). The display and backlight sleep after 30 seconds of
 inactivity. A short button press toggles the display; a three-second hold still
 restarts into the MCUBoot button menu. BLE, the clock, battery sampling, and the
@@ -75,9 +78,10 @@ choices are recorded in [Watch UI direction](docs/ui.md).
 
 The CST816S touch controller is active while the screen is awake. From the
 clock, swipe up for Launcher, down for Notifications, right for Settings, or
-left for About. Swipe in the opposite direction to return. In Launcher, tap
-Settings or About. These pages currently provide basic navigation and status;
-notification history and editable settings are future work. A short button
+left for About. Swipe down to go back from Launcher, Settings, or About; swipe
+up to return from Notifications. In Launcher, tap Settings or About. These pages
+provide basic navigation and status; notification history and persistent
+settings are future work. A short button
 press still toggles the display, and a three-second hold restarts into the
 MCUBoot menu.
 

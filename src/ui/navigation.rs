@@ -67,6 +67,8 @@ impl Navigation {
             (Page::Launcher, TouchEvent::SwipeDown)
             | (Page::Notifications, TouchEvent::SwipeUp)
             | (Page::Settings, TouchEvent::SwipeLeft)
+            | (Page::Settings, TouchEvent::SwipeDown)
+            | (Page::About, TouchEvent::SwipeDown)
             | (Page::About, TouchEvent::SwipeRight) => self.back(),
             _ => false,
         }

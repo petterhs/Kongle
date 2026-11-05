@@ -200,6 +200,7 @@ async fn touch_task(
     let mut active = false;
     let mut awake = true;
     let mut suppress_until = Instant::now();
+    let mut gesture_debouncer = touch::GestureDebouncer::new();
     loop {
         if !active {
             if !awake && !cfg!(feature = "touch-wake-debug") {
@@ -226,7 +227,11 @@ async fn touch_task(
                     suppress_until = Instant::now() + Duration::from_millis(500);
                 }
                 Ok(Some(touch::TouchEvent::Contact)) | Ok(None) => {}
-                Ok(Some(gesture)) if awake && Instant::now() >= suppress_until => {
+                Ok(Some(gesture))
+                    if awake
+                        && Instant::now() >= suppress_until
+                        && gesture_debouncer.accept(gesture, Instant::now().as_millis()) =>
+                {
                     defmt::info!("Touch gesture: {:?}", gesture);
                     sender.send(InputEvent::Touch(gesture)).await;
                 }

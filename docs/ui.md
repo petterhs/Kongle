@@ -22,7 +22,8 @@ allocation or a trait object.
 Drawing and last-rendered values live in `src/ui.rs`. The application task
 translates clock, battery, BLE, OTA, button, and touch events into UI state
 changes. On a screen transition or wake, it clears and draws while the
-backlight is off. On the clock page, it redraws only changed fields. OTA
+backlight is off. On the clock page, it redraws time when hours or minutes
+change, battery when sampled, and BLE state on connection changes. OTA
 activity returns to the clock so progress remains visible; a transfer
 percentage does not imply that validation or activation passed.
 
@@ -32,7 +33,8 @@ percentage does not imply that validation or activation passed.
 interrupt-driven gesture reports. `src/touch.rs` decodes taps and all four
 swipes independently of hardware; `src/ui/navigation.rs` routes them between
 pages. From the clock, up opens Launcher, down Notifications, right Settings,
-and left About. The reverse swipe returns. Launcher taps open Settings or
+and left About. Swipe down returns from Launcher, Settings, or About; swipe up
+returns from Notifications. Launcher taps open Settings or
 About. Short button press toggles the display; a three-second hold restarts
 into the bootloader menu on MCUBoot builds. These inputs need validation on
 the ST-Link watch before using this firmware on a closed watch.
@@ -78,13 +80,15 @@ power touch-wake mode should be offered to daily-driver devices.
   but it needs a licensed source font and a host conversion step. Keep its
   glyphs limited to digits and punctuation to control flash use.
 
-For icons, draw the battery and BLE status directly with `embedded-graphics`
-primitives; these are small and easy to theme. If the launcher needs a larger
-set, [`embedded-iconoir`](https://docs.rs/embedded-iconoir/0.2.3/embedded_iconoir/)
-offers icons compatible with `embedded-graphics` 0.8 and compiles only the
-selected assets. Review icon legibility at 16 or 24 pixels on the watch before
-adding a whole set. Host-rendered PNG previews can help choose a direction,
-but the actual ST7789 display should decide colors and sizes.
+The clock status row now uses 24-pixel battery-level and Bluetooth icons from
+[`embedded-iconoir`](https://docs.rs/embedded-iconoir/0.2.3/embedded_iconoir/).
+Only the 24-pixel resolution is enabled, and only referenced icons are linked.
+Battery percentage remains beside the icon by default and can be hidden from
+Settings for the current session. This setting is held in RAM and resets after
+a reboot; persistent storage needs a separate design that does not interfere
+with the bootloader or OTA slots. Review icon legibility and disconnected-state
+contrast on the ST7789 panel before expanding the icon set. Host-rendered PNG
+previews can help choose a direction, but the watch should decide final sizes.
 
 References: [embedded-graphics](https://docs.rs/embedded-graphics/0.8.2/embedded_graphics/),
 [embedded-layout](https://docs.rs/embedded-layout/0.4.2/embedded_layout/),

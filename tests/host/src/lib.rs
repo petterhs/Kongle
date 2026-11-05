@@ -46,6 +46,17 @@ mod tests {
     }
 
     #[test]
+    fn touch_debouncer_drops_duplicate_reports_but_allows_a_return_swipe() {
+        use touch::TouchEvent::*;
+        let mut gate = touch::GestureDebouncer::new();
+        assert!(gate.accept(SwipeUp, 1_000));
+        assert!(!gate.accept(SwipeUp, 1_212));
+        assert!(gate.accept(SwipeDown, 1_300));
+        assert!(!gate.accept(SwipeDown, 1_308));
+        assert!(gate.accept(SwipeDown, 1_700));
+    }
+
+    #[test]
     fn navigation_uses_four_clock_swipes_and_bounded_return_stack() {
         use navigation::{Navigation, Page};
         use touch::TouchEvent::*;
@@ -55,7 +66,7 @@ mod tests {
         assert_eq!(nav.page(), Page::Launcher);
         assert!(nav.handle(Tap { x: 20, y: 100 }));
         assert_eq!(nav.page(), Page::Settings);
-        assert!(nav.handle(SwipeLeft));
+        assert!(nav.handle(SwipeDown));
         assert_eq!(nav.page(), Page::Launcher);
         assert!(nav.handle(SwipeDown));
         assert_eq!(nav.page(), Page::Clock);
@@ -64,7 +75,7 @@ mod tests {
         assert!(nav.handle(SwipeUp));
         assert!(nav.handle(SwipeRight));
         assert_eq!(nav.page(), Page::Settings);
-        assert!(nav.handle(SwipeLeft));
+        assert!(nav.handle(SwipeDown));
         assert!(nav.handle(SwipeLeft));
         assert_eq!(nav.page(), Page::About);
         assert!(nav.clock());
@@ -198,13 +209,33 @@ mod tests {
     }
 
     #[test]
-    fn battery_clear_covers_the_longest_text_at_its_baseline() {
-        let pos = Point::new(display::BATTERY_POS_X, display::BATTERY_POS_Y);
+    fn battery_clear_covers_clock_and_about_text() {
+        let pos = Point::new(display::BATTERY_PERCENT_POS_X, display::BATTERY_POS_Y);
         let style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
-        let text = Text::new("4.20V+ 100%", pos, style).bounding_box();
+        let text = Text::new("100%+", pos, style).bounding_box();
         let clear = display::text_bounds(&FONT_10X20, display::BATTERY_CHARS, pos);
         assert!(clear.contains(text.top_left));
         assert!(clear.contains(text.bottom_right().unwrap()));
+
+        let about_pos = Point::new(
+            display::ABOUT_BATTERY_POS_X,
+            display::ABOUT_BATTERY_PERCENT_Y,
+        );
+        let about_text = Text::new("Battery: 100%+", about_pos, style).bounding_box();
+        let about_clear =
+            display::text_bounds(&FONT_10X20, display::ABOUT_BATTERY_CHARS, about_pos);
+        assert!(about_clear.contains(about_text.top_left));
+        assert!(about_clear.contains(about_text.bottom_right().unwrap()));
+
+        let voltage_pos = Point::new(
+            display::ABOUT_BATTERY_POS_X,
+            display::ABOUT_BATTERY_VOLTAGE_Y,
+        );
+        let voltage_text = Text::new("Voltage: 4.20V", voltage_pos, style).bounding_box();
+        let voltage_clear =
+            display::text_bounds(&FONT_10X20, display::ABOUT_BATTERY_CHARS, voltage_pos);
+        assert!(voltage_clear.contains(voltage_text.top_left));
+        assert!(voltage_clear.contains(voltage_text.bottom_right().unwrap()));
     }
 
     #[test]
