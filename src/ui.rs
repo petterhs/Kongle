@@ -24,6 +24,7 @@ use heapless::String;
 use crate::{
     device::{battery::BatteryState, display as cfg},
     fonts::JETBRAINS_FONT_54_POINT_EXTRA_BOLD,
+    notifications::{Inbox, Notification},
     ota::UpdateStatus,
     touch::TouchEvent,
     TimeState, FIRMWARE_VERSION,
@@ -63,6 +64,39 @@ fn draw_battery_icon<D: DrawTarget<Color = Rgb565>>(
         draw_icon::<D, system::BatteryTwoFive>(display, position, color);
     } else {
         draw_icon::<D, system::BatteryEmpty>(display, position, color);
+    }
+}
+
+fn draw_ascii_lines<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    text: &str,
+    y: i32,
+    max_lines: usize,
+    style: embedded_graphics::mono_font::MonoTextStyle<'_, Rgb565>,
+) {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    for line in 0..max_lines {
+        while start < bytes.len() && bytes[start] == b' ' {
+            start += 1;
+        }
+        if start >= bytes.len() {
+            break;
+        }
+        let limit = (start + 20).min(bytes.len());
+        let end = if limit < bytes.len() {
+            bytes[start..limit]
+                .iter()
+                .rposition(|&byte| byte == b' ')
+                .map(|offset| start + offset)
+                .filter(|&pos| pos > start)
+                .unwrap_or(limit)
+        } else {
+            limit
+        };
+        let line_text = core::str::from_utf8(&bytes[start..end]).unwrap_or("");
+        let _ = Text::new(line_text, Point::new(20, y + line as i32 * 23), style).draw(display);
+        start = end;
     }
 }
 
@@ -113,6 +147,7 @@ fn date_text(time: TimeState) -> String<16> {
 
 pub struct WatchUi {
     navigation: Navigation,
+    notifications: Inbox,
     show_battery_percent: bool,
     last_time: Option<TimeState>,
     last_battery: Option<BatteryState>,
@@ -123,6 +158,7 @@ impl WatchUi {
     pub const fn new() -> Self {
         Self {
             navigation: Navigation::new(),
+            notifications: Inbox::new(),
             show_battery_percent: true,
             last_time: None,
             last_battery: None,
@@ -131,6 +167,13 @@ impl WatchUi {
     }
 
     pub fn handle_touch(&mut self, event: TouchEvent) -> bool {
+        if self.navigation.page() == Page::Notifications {
+            match event {
+                TouchEvent::SwipeLeft => return self.notifications.older(),
+                TouchEvent::SwipeRight => return self.notifications.newer(),
+                _ => {}
+            }
+        }
         if self.navigation.page() == Page::Settings
             && matches!(event, TouchEvent::Tap { y: 70..=130, .. })
         {
@@ -138,6 +181,13 @@ impl WatchUi {
             return true;
         }
         self.navigation.handle(event)
+    }
+
+    pub fn receive_notification(&mut self, notification: Notification, show: bool) {
+        self.notifications.push(notification);
+        if show {
+            self.navigation.notifications();
+        }
     }
 
     /// OTA progress must remain visible even if another page was open.
@@ -384,7 +434,20 @@ impl WatchUi {
                 let _ = Text::new("ABOUT", Point::new(20, 165), style).draw(display);
             }
             Page::Notifications => {
-                let _ = Text::new("No notifications", Point::new(20, 110), style).draw(display);
+                if let Some(notification) = self.notifications.selected() {
+                    draw_ascii_lines(display, &notification.title, 75, 2, accent);
+                    draw_ascii_lines(display, &notification.body, 125, 3, style);
+                    let mut position: String<16> = String::new();
+                    let _ = write!(
+                        &mut position,
+                        "{} / {}  < >",
+                        self.notifications.position(),
+                        self.notifications.count()
+                    );
+                    let _ = Text::new(&position, Point::new(20, 197), style).draw(display);
+                } else {
+                    let _ = Text::new("No notifications", Point::new(20, 110), style).draw(display);
+                }
             }
             Page::Settings => {
                 let battery = if self.show_battery_percent {
