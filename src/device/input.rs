@@ -1,7 +1,12 @@
 use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
 use defmt::Format;
-use embassy_nrf::gpio::{Input, Output};
+use embassy_nrf::{
+    gpio::{Input, Output},
+    twim::{self, Twim},
+};
 use embassy_time::{Duration, Timer};
+
+use crate::touch::{self, TouchEvent};
 
 /// Button input events
 #[derive(Clone, Copy, Debug, PartialEq, Format)]
@@ -9,7 +14,8 @@ pub enum InputEvent {
     ButtonPressed,
     ButtonReleased,
     ButtonHeld,
-    TouchDetected,
+    TouchWake,
+    Touch(TouchEvent),
 }
 
 /// Button handler for PineTime (simplified)
@@ -48,26 +54,69 @@ impl<'d> Button<'d> {
     }
 }
 
-/// Touch screen handler placeholder for future implementation
-pub struct TouchScreen {
-    // Future implementation with CST816S driver
+/// PineTime CST816S on TWIM1. IRQ is active low; register 0x01 reports the
+/// gesture and registers 0x03..0x06 report its position.
+pub struct TouchScreen<'d> {
+    twim: Twim<'d>,
+    irq: Input<'d>,
+    reset: Output<'d>,
 }
 
-impl TouchScreen {
-    pub fn new() -> Self {
-        Self {}
+impl<'d> TouchScreen<'d> {
+    const ADDRESS: u8 = 0x15;
+
+    pub fn new(twim: Twim<'d>, irq: Input<'d>, reset: Output<'d>) -> Self {
+        Self { twim, irq, reset }
     }
 
-    /// Initialize touch screen (placeholder)
-    pub async fn init(&mut self) {
-        // Future: Initialize CST816S touch controller
+    pub async fn init(&mut self) -> Result<u8, twim::Error> {
+        self.reset.set_low();
+        Timer::after(Duration::from_millis(5)).await;
+        self.reset.set_high();
+        Timer::after(Duration::from_millis(50)).await;
+
+        // InfiniTime issues a dummy read before the chip ID read. Some
+        // controllers report an unreliable ID even though touch works.
+        let mut dummy = [0];
+        let _ = self
+            .twim
+            .write_read(Self::ADDRESS, &[0x15], &mut dummy)
+            .await;
+        Timer::after(Duration::from_millis(5)).await;
+        let mut chip_id = [0xff];
+        let _ = self
+            .twim
+            .write_read(Self::ADDRESS, &[0xa7], &mut chip_id)
+            .await;
+        Timer::after(Duration::from_millis(5)).await;
+        // Follow InfiniTime's continuous horizontal-motion and double-tap
+        // setup. The controller still reports all four swipe codes.
+        self.twim.write(Self::ADDRESS, &[0xec, 0x05]).await?;
+        self.twim.write(Self::ADDRESS, &[0xfa, 0x70]).await?;
+        self.twim.write(Self::ADDRESS, &[0xfb, 0x00]).await?;
+        #[cfg(feature = "touch-wake-debug")]
+        self.twim.write(Self::ADDRESS, &[0xfe, 0x01]).await?;
+        Ok(chip_id[0])
     }
 
-    /// Check for touch events (placeholder)
-    pub async fn poll(&mut self) -> Option<InputEvent> {
-        // Future: Implement touch polling
-        Timer::after(Duration::from_millis(10)).await;
-        None
+    /// Stop touch scanning while the display sleeps in normal builds.
+    pub async fn sleep(&mut self) -> Result<(), twim::Error> {
+        self.twim.write(Self::ADDRESS, &[0xa5, 0x03]).await
+    }
+
+    pub async fn next(&mut self) -> Result<Option<TouchEvent>, twim::Error> {
+        // Use the pin's level-sensitive PORT event. The dedicated GPIOTE
+        // channel wait path panicked after a gesture on the development watch.
+        // The CST816S can hold IRQ low after a read. Require it to return high
+        // before accepting another low; otherwise one swipe is read repeatedly.
+        self.irq.wait_for_high().await;
+        self.irq.wait_for_low().await;
+        let register = [0x01];
+        let mut frame = [0; 6];
+        self.twim
+            .write_read(Self::ADDRESS, &register, &mut frame)
+            .await?;
+        Ok(touch::decode(frame))
     }
 }
 

@@ -89,19 +89,18 @@ pub const DATE_POS_Y: i32 = 151;
 pub const DATE_CHARS: u32 = 10;
 pub const DATE_DIVIDER_Y: i32 = 122;
 
-pub const SECONDS_POS_X: i32 = 178;
-pub const SECONDS_POS_Y: i32 = 180;
-pub const SECONDS_CHARS: u32 = 2;
-
-pub const VERSION_POS_X: i32 = 10;
-pub const VERSION_POS_Y: i32 = SECONDS_POS_Y;
-
-pub const BATTERY_POS_X: i32 = 10;
 pub const BATTERY_POS_Y: i32 = 18;
-pub const BATTERY_CHARS: u32 = 11;
+pub const BATTERY_ICON_POS_X: i32 = 10;
+pub const STATUS_ICON_POS_Y: i32 = 0;
+pub const STATUS_ICON_SIZE: u32 = 24;
+pub const BATTERY_PERCENT_POS_X: i32 = 40;
+pub const BATTERY_CHARS: u32 = 5;
+pub const ABOUT_BATTERY_POS_X: i32 = 20;
+pub const ABOUT_BATTERY_PERCENT_Y: i32 = 175;
+pub const ABOUT_BATTERY_VOLTAGE_Y: i32 = 195;
+pub const ABOUT_BATTERY_CHARS: u32 = 15;
 
-pub const BLE_POS_X: i32 = 220;
-pub const BLE_POS_Y: i32 = 18;
+pub const BLE_ICON_POS_X: i32 = 206;
 
 pub const UPDATE_POS_X: i32 = 10;
 pub const UPDATE_POS_Y: i32 = 226;

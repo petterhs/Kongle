@@ -8,16 +8,23 @@ mod dfu;
 mod flash;
 mod fonts;
 mod ota;
+mod touch;
 mod ui;
+
+#[cfg(all(feature = "touch-wake-debug", feature = "ota-staging"))]
+compile_error!("touch-wake-debug must not be combined with OTA firmware features");
 
 use core::cell::RefCell;
 use defmt_rtt as _;
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice as SharedSpiDevice;
 use embassy_executor::Spawner;
-use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::Priority;
 use embassy_nrf::saadc;
 use embassy_nrf::spim::{Config as SpimConfig, Frequency, Spim, MODE_3};
+use embassy_nrf::{
+    gpio::{Input, Level, Output, OutputDrive, Pull},
+    twim::{Config as TwimConfig, Twim},
+};
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Instant, Ticker, Timer};
@@ -37,6 +44,7 @@ pub(crate) const FIRMWARE_VERSION: &str =
 
 embassy_nrf::bind_interrupts!(struct Irqs {
     TWISPI0 => embassy_nrf::spim::InterruptHandler<embassy_nrf::peripherals::TWISPI0>;
+    TWISPI1 => embassy_nrf::twim::InterruptHandler<embassy_nrf::peripherals::TWISPI1>;
     SAADC => embassy_nrf::saadc::InterruptHandler;
 });
 
@@ -79,8 +87,10 @@ impl TimeState {
 static TIME_WATCH: Watch<CriticalSectionRawMutex, TimeState, 2> = Watch::new();
 static BATTERY_WATCH: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
 static BLE_CONNECTED_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
-static BUTTON_CH: Channel<CriticalSectionRawMutex, InputEvent, 4> = Channel::new();
+static INPUT_CH: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new();
+static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 1> = Watch::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
+static TOUCH_TX_BUFFER: StaticCell<[u8; 8]> = StaticCell::new();
 type FlashSpi = SharedSpiDevice<'static, NoopRawMutex, Spim<'static>, Output<'static>>;
 /// The future BLE receiver publishes progress here; the display owns the view.
 pub(crate) static OTA_WATCH: Watch<CriticalSectionRawMutex, UpdateStatus, 2> = Watch::new();
@@ -135,7 +145,7 @@ async fn battery_task(
 #[embassy_executor::task]
 async fn button_task(
     mut button: device::input::Button<'static>,
-    sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, InputEvent, 4>,
+    sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, InputEvent, 8>,
 ) {
     let mut pressed_since = None;
     let mut held_sent = false;
@@ -178,6 +188,75 @@ async fn button_task(
         }
         // Six samples at 10 ms intervals provide debounce without a busy loop.
         Timer::after(Duration::from_millis(10)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn touch_task(
+    mut touch: device::input::TouchScreen<'static>,
+    mut awake_rx: embassy_sync::watch::Receiver<'static, CriticalSectionRawMutex, bool, 1>,
+    sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, InputEvent, 8>,
+) {
+    let mut active = false;
+    let mut awake = true;
+    let mut suppress_until = Instant::now();
+    let mut gesture_debouncer = touch::GestureDebouncer::new();
+    loop {
+        if !active {
+            if !awake && !cfg!(feature = "touch-wake-debug") {
+                awake = awake_rx.changed().await;
+                continue;
+            }
+            match touch.init().await {
+                Ok(chip_id) => {
+                    defmt::info!("Touch CST816S initialized; chip ID {:02x}", chip_id);
+                    active = true;
+                }
+                Err(error) => {
+                    defmt::warn!("Touch initialization failed: {:?}", error);
+                    Timer::after(Duration::from_secs(1)).await;
+                    continue;
+                }
+            }
+        }
+        match embassy_futures::select::select(touch.next(), awake_rx.changed()).await {
+            embassy_futures::select::Either::First(result) => match result {
+                Ok(Some(gesture)) if !awake && cfg!(feature = "touch-wake-debug") => {
+                    defmt::info!("Touch wake: {:?}", gesture);
+                    sender.send(InputEvent::TouchWake).await;
+                    suppress_until = Instant::now() + Duration::from_millis(500);
+                }
+                Ok(Some(touch::TouchEvent::Contact)) | Ok(None) => {}
+                Ok(Some(gesture))
+                    if awake
+                        && Instant::now() >= suppress_until
+                        && gesture_debouncer.accept(gesture, Instant::now().as_millis()) =>
+                {
+                    defmt::info!("Touch gesture: {:?}", gesture);
+                    sender.send(InputEvent::Touch(gesture)).await;
+                }
+                Ok(Some(_)) => {}
+                Err(error) => {
+                    defmt::warn!("Touch read failed: {:?}; resetting controller", error);
+                    active = false;
+                }
+            },
+            embassy_futures::select::Either::Second(new_awake) => {
+                if awake == new_awake {
+                    continue;
+                }
+                awake = new_awake;
+                if cfg!(feature = "touch-wake-debug") {
+                    continue;
+                }
+                if !awake {
+                    if let Err(error) = touch.sleep().await {
+                        defmt::warn!("Touch sleep failed: {:?}", error);
+                    }
+                    active = false;
+                }
+            }
+        }
     }
 }
 
@@ -255,6 +334,21 @@ async fn main(spawner: Spawner) {
         Input::new(p.P0_13, Pull::Down),
         Output::new(p.P0_15, Level::High, OutputDrive::Standard),
     );
+    let mut touch_config = TwimConfig::default();
+    touch_config.sda_pullup = true;
+    touch_config.scl_pullup = true;
+    let touch = device::input::TouchScreen::new(
+        Twim::new(
+            p.TWISPI1,
+            Irqs,
+            p.P0_06,
+            p.P0_07,
+            touch_config,
+            TOUCH_TX_BUFFER.init([0; 8]),
+        ),
+        Input::new(p.P0_28, Pull::Up),
+        Output::new(p.P0_10, Level::High, OutputDrive::Standard),
+    );
 
     // PineTime backlight pins (active-low): P0.14, P0.22, P0.23
     let backlight_low = Output::new(p.P0_14, Level::High, OutputDrive::Standard);
@@ -323,7 +417,15 @@ async fn main(spawner: Spawner) {
         .spawn(battery_task(battery, BATTERY_WATCH.sender()))
         .unwrap();
     spawner
-        .spawn(button_task(button, BUTTON_CH.sender()))
+        .spawn(button_task(button, INPUT_CH.sender()))
+        .unwrap();
+    SCREEN_AWAKE_WATCH.sender().send(true);
+    spawner
+        .spawn(touch_task(
+            touch,
+            SCREEN_AWAKE_WATCH.receiver().unwrap(),
+            INPUT_CH.sender(),
+        ))
         .unwrap();
 
     let time_rx_ble = TIME_WATCH.receiver().unwrap();
@@ -365,7 +467,7 @@ async fn main(spawner: Spawner) {
     let mut battery_rx = BATTERY_WATCH.receiver().unwrap();
     let mut ota_rx = OTA_WATCH.receiver().unwrap();
     let mut ble_rx = BLE_CONNECTED_WATCH.receiver().unwrap();
-    let button_rx = BUTTON_CH.receiver();
+    let input_rx = INPUT_CH.receiver();
 
     let mut last_ota = UpdateStatus::Idle;
     let mut ble_connected = false;
@@ -379,7 +481,7 @@ async fn main(spawner: Spawner) {
                 time_rx.changed(),
                 embassy_futures::select::select(
                     battery_rx.changed(),
-                    embassy_futures::select::select(button_rx.receive(), ble_rx.changed()),
+                    embassy_futures::select::select(input_rx.receive(), ble_rx.changed()),
                 ),
             ),
         )
@@ -388,6 +490,15 @@ async fn main(spawner: Spawner) {
             embassy_futures::select::Either::First(status) => {
                 last_ota = status;
                 sleep_at = Instant::now() + Duration::from_secs(30);
+                if matches!(
+                    status,
+                    UpdateStatus::Erasing
+                        | UpdateStatus::Receiving { .. }
+                        | UpdateStatus::Validating
+                ) && watch_ui.show_clock()
+                {
+                    redraw = true;
+                }
                 if matches!(
                     status,
                     UpdateStatus::Erasing
@@ -433,6 +544,22 @@ async fn main(spawner: Spawner) {
                         sleep_at = Instant::now() + Duration::from_secs(30);
                     }
                 }
+                if matches!(event, InputEvent::TouchWake)
+                    && cfg!(feature = "touch-wake-debug")
+                    && !awake
+                {
+                    awake = true;
+                    redraw = true;
+                    sleep_at = Instant::now() + Duration::from_secs(30);
+                }
+                if let InputEvent::Touch(gesture) = event {
+                    if awake {
+                        sleep_at = Instant::now() + Duration::from_secs(30);
+                        if watch_ui.handle_touch(gesture) {
+                            redraw = true;
+                        }
+                    }
+                }
                 #[cfg(feature = "mcuboot")]
                 if matches!(event, InputEvent::ButtonHeld) {
                     defmt::info!("Long hold: restarting into MCUBoot button menu");
@@ -464,6 +591,7 @@ async fn main(spawner: Spawner) {
             if !display.is_sleeping() {
                 backlight.off();
                 display.sleep(&mut DeferredDelay).unwrap();
+                SCREEN_AWAKE_WATCH.sender().send(false);
                 Timer::after(Duration::from_millis(120)).await;
                 defmt::info!("Display asleep; BLE remains active");
             }
@@ -478,6 +606,9 @@ async fn main(spawner: Spawner) {
         if redraw {
             // Keep the backlight dark until the full wake redraw has finished.
             // Otherwise the clear and each text draw become visible in sequence.
+            if !waking {
+                backlight.off();
+            }
             display.clear(display_cfg::BACKGROUND_COLOR).unwrap();
             watch_ui.draw_full(
                 &mut display,
@@ -487,8 +618,9 @@ async fn main(spawner: Spawner) {
                 ble_connected,
             );
             redraw = false;
+            SCREEN_AWAKE_WATCH.sender().send(true);
+            backlight.set(7);
             if waking {
-                backlight.set(7);
                 defmt::info!("Display awake");
             }
         }
