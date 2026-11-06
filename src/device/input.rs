@@ -1,4 +1,3 @@
-use debouncr::{debounce_6, Debouncer, Edge, Repeat6};
 use defmt::Format;
 use embassy_nrf::{
     gpio::{Input, Output},
@@ -18,11 +17,10 @@ pub enum InputEvent {
     Touch(TouchEvent),
 }
 
-/// Button handler for PineTime (simplified)
+/// Button input for PineTime.
 pub struct Button<'d> {
     button_pin: Input<'d>,
     _enable: Output<'d>,
-    debouncer: Debouncer<u8, Repeat6>,
 }
 
 impl<'d> Button<'d> {
@@ -31,25 +29,21 @@ impl<'d> Button<'d> {
         Self {
             button_pin,
             _enable: enable,
-            debouncer: debounce_6(false),
         }
     }
 
-    /// Poll button and return events
-    pub fn poll(&mut self) -> Option<InputEvent> {
-        // P0.15 supplies the button; P0.13 is active-high with a pull-down.
-        let pressed = self.is_pressed();
-        let edge = self.debouncer.update(pressed);
+    /// Wait for the active-high button rather than waking the CPU to poll it.
+    pub async fn wait_for_press(&mut self) {
+        self.button_pin.wait_for_high().await;
+    }
 
-        match edge {
-            Some(Edge::Rising) => Some(InputEvent::ButtonPressed),
-            Some(Edge::Falling) => Some(InputEvent::ButtonReleased),
-            None => None,
-        }
+    pub async fn wait_for_release(&mut self) {
+        self.button_pin.wait_for_low().await;
     }
 
     /// Check if button is currently pressed
     pub fn is_pressed(&self) -> bool {
+        // P0.15 supplies the button; P0.13 is active-high with a pull-down.
         self.button_pin.is_high()
     }
 }

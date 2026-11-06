@@ -149,47 +149,71 @@ async fn button_task(
     mut button: device::input::Button<'static>,
     sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, InputEvent, 8>,
 ) {
+    let mut pressed = button.is_pressed();
     let mut pressed_since = None;
     let mut held_sent = false;
     // A stuck or deliberately held button at startup must not reset the app
     // again before the bootloader's button menu can be used. Arm only after a
     // release, then require a fresh press for a long hold.
-    let mut armed = !button.is_pressed();
+    let mut armed = !pressed;
     loop {
-        if let Some(event) = button.poll() {
-            if !armed {
-                if matches!(event, InputEvent::ButtonReleased) {
-                    armed = true;
+        if pressed {
+            if armed && !held_sent {
+                let deadline = pressed_since.unwrap() + Duration::from_secs(3);
+                match embassy_futures::select::select(
+                    button.wait_for_release(),
+                    Timer::at(deadline),
+                )
+                .await
+                {
+                    embassy_futures::select::Either::First(()) => {}
+                    embassy_futures::select::Either::Second(()) => {
+                        held_sent = true;
+                        sender.send(InputEvent::ButtonHeld).await;
+                        continue;
+                    }
                 }
             } else {
-                match event {
-                    InputEvent::ButtonPressed => {
-                        pressed_since = Some(Instant::now());
-                        held_sent = false;
-                    }
-                    InputEvent::ButtonReleased => {
-                        pressed_since = None;
-                        // A release following the recovery hold is not a tap.
-                        if held_sent {
-                            held_sent = false;
-                            continue;
-                        }
-                    }
-                    _ => {}
-                }
-                sender.send(event).await;
+                button.wait_for_release().await;
+            }
+        } else {
+            button.wait_for_press().await;
+        }
+
+        // Sample only after an edge. Six stable readings reject button bounce
+        // without a 10 ms timer running for the entire lifetime of the watch.
+        let next_pressed = !pressed;
+        let mut stable = true;
+        for _ in 0..6 {
+            Timer::after(Duration::from_millis(10)).await;
+            if button.is_pressed() != next_pressed {
+                stable = false;
+                break;
             }
         }
-        if !held_sent
-            && pressed_since
-                .map(|start| start.elapsed() >= Duration::from_secs(3))
-                .unwrap_or(false)
-        {
-            held_sent = true;
-            sender.send(InputEvent::ButtonHeld).await;
+        if !stable {
+            continue;
         }
-        // Six samples at 10 ms intervals provide debounce without a busy loop.
-        Timer::after(Duration::from_millis(10)).await;
+        pressed = next_pressed;
+        if !armed {
+            if !pressed {
+                armed = true;
+            }
+            continue;
+        }
+        if pressed {
+            pressed_since = Some(Instant::now());
+            held_sent = false;
+            sender.send(InputEvent::ButtonPressed).await;
+        } else {
+            pressed_since = None;
+            // A release following the recovery hold is not a tap.
+            if held_sent {
+                held_sent = false;
+            } else {
+                sender.send(InputEvent::ButtonReleased).await;
+            }
+        }
     }
 }
 
