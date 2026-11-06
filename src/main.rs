@@ -1,6 +1,11 @@
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 
+mod battery_history;
+#[cfg(feature = "battery-persist-experimental")]
+mod battery_persist;
+#[cfg(feature = "battery-persist-experimental")]
+mod battery_record;
 mod ble;
 mod current_time;
 mod device;
@@ -26,6 +31,7 @@ use embassy_nrf::{
     twim::{Config as TwimConfig, Twim},
 };
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
+use embassy_sync::mutex::Mutex as AsyncMutex;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_graphics::prelude::*;
@@ -86,12 +92,16 @@ impl TimeState {
 
 static TIME_WATCH: Watch<CriticalSectionRawMutex, TimeState, 2> = Watch::new();
 static BATTERY_WATCH: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
+static BATTERY_HISTORY: BlockingMutex<CriticalSectionRawMutex, RefCell<battery_history::History>> =
+    BlockingMutex::new(RefCell::new(battery_history::History::new()));
 static BLE_CONNECTED_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
 static INPUT_CH: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new();
 static NOTIFICATION_CH: Channel<CriticalSectionRawMutex, notifications::Notification, 2> =
     Channel::new();
 static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 1> = Watch::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
+static FLASH_CELL: StaticCell<AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>> =
+    StaticCell::new();
 static TOUCH_TX_BUFFER: StaticCell<[u8; 8]> = StaticCell::new();
 type FlashSpi = SharedSpiDevice<'static, NoopRawMutex, Spim<'static>, Output<'static>>;
 /// The future BLE receiver publishes progress here; the display owns the view.
@@ -135,11 +145,31 @@ async fn clock_task(
 async fn battery_task(
     mut battery: device::battery::Battery<'static>,
     sender: embassy_sync::watch::Sender<'static, CriticalSectionRawMutex, BatteryState, 2>,
+    #[cfg(feature = "battery-persist-experimental")] flash: &'static AsyncMutex<
+        CriticalSectionRawMutex,
+        flash::Flash<FlashSpi>,
+    >,
 ) {
     battery.calibrate().await;
     loop {
         let state = battery.update().await;
+        let sample = BATTERY_HISTORY.lock(|history| {
+            history.borrow_mut().record(
+                (Instant::now().as_millis() / 1000) as u32,
+                state.mv,
+                state.percent,
+                state.charging,
+            )
+        });
         sender.send(state);
+        #[cfg(feature = "battery-persist-experimental")]
+        if let Some(sample) = sample {
+            if let Err(error) = battery_persist::append(flash, sample).await {
+                defmt::warn!("Battery LittleFS append failed: {}", error.code());
+            }
+        }
+        #[cfg(not(feature = "battery-persist-experimental"))]
+        let _ = sample;
         Timer::after(Duration::from_secs(10)).await;
     }
 }
@@ -314,7 +344,8 @@ async fn ble_peripheral_task(
         notifications::Notification,
         2,
     >,
-    flash: flash::Flash<FlashSpi>,
+    flash: &'static AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>,
+    battery_rx: embassy_sync::watch::Receiver<'static, CriticalSectionRawMutex, BatteryState, 2>,
 ) {
     ble::run(
         controller,
@@ -324,6 +355,8 @@ async fn ble_peripheral_task(
         BLE_CONNECTED_WATCH.sender(),
         notification_tx,
         flash,
+        battery_rx,
+        &BATTERY_HISTORY,
     )
     .await
 }
@@ -412,7 +445,9 @@ async fn main(spawner: Spawner) {
     let spi_bus = SPI_BUS.init(BlockingMutex::new(RefCell::new(spim)));
     let spi_dev = SharedSpiDevice::new(spi_bus, cs);
     let flash_cs = Output::new(p.P0_05, Level::High, OutputDrive::Standard);
-    let flash = flash::Flash::new(SharedSpiDevice::new(spi_bus, flash_cs));
+    let flash = FLASH_CELL.init(AsyncMutex::new(flash::Flash::new(SharedSpiDevice::new(
+        spi_bus, flash_cs,
+    ))));
     let di = display_interface_spi::SPIInterface::new(spi_dev, dc);
 
     // Create a simple blocking delay instead of embassy_time::Delay
@@ -446,11 +481,24 @@ async fn main(spawner: Spawner) {
     let saadc = saadc::Saadc::new(p.SAADC, Irqs, saadc::Config::default(), [channel]);
     let battery = device::battery::Battery::new(saadc, charge_pin);
 
+    #[cfg(feature = "battery-persist-experimental")]
+    if let Err(error) = battery_persist::load(flash, &BATTERY_HISTORY).await {
+        defmt::warn!(
+            "Battery LittleFS unavailable; keeping history in RAM: {}",
+            error.code()
+        );
+    }
+
     spawner
         .spawn(clock_task(TIME_WATCH.sender(), SET_TIME_CH.receiver()))
         .unwrap();
     spawner
-        .spawn(battery_task(battery, BATTERY_WATCH.sender()))
+        .spawn(battery_task(
+            battery,
+            BATTERY_WATCH.sender(),
+            #[cfg(feature = "battery-persist-experimental")]
+            flash,
+        ))
         .unwrap();
     spawner
         .spawn(button_task(button, INPUT_CH.sender()))
@@ -495,6 +543,7 @@ async fn main(spawner: Spawner) {
             SET_TIME_CH.sender(),
             NOTIFICATION_CH.sender(),
             flash,
+            BATTERY_WATCH.receiver().unwrap(),
         ))
         .unwrap();
 

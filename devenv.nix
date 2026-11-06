@@ -54,5 +54,6 @@ in
   env = {
     LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
     BINDGEN_EXTRA_CLANG_ARGS = "--sysroot=${pkgs.gcc-arm-embedded-13}/arm-none-eabi";
+    CC_thumbv7em_none_eabihf = "${pkgs.gcc-arm-embedded-13}/bin/arm-none-eabi-gcc";
   };
 }

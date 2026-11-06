@@ -13,6 +13,10 @@ use crate::ota::{
 const PAGE_SIZE: u32 = 256;
 const SLOT_END: u32 = SECONDARY_SLOT_START + SECONDARY_SLOT_SIZE;
 const IMAGE_END: u32 = SECONDARY_SLOT_START + crate::ota::MAX_IMAGE_SIZE;
+#[cfg(feature = "battery-persist-experimental")]
+pub const FS_START: u32 = 0x000b_4000;
+#[cfg(feature = "battery-persist-experimental")]
+pub const FS_SIZE: u32 = 0x0034_c000;
 
 #[derive(Clone, Copy, Debug, defmt::Format)]
 pub enum FlashError {
@@ -107,6 +111,64 @@ impl<SPI: SpiDevice<u8>> Flash<SPI> {
             return Err(FlashError::WriteNotEnabled);
         }
         Ok(())
+    }
+
+    #[cfg(feature = "battery-persist-experimental")]
+    fn fs_range(address: u32, len: usize) -> Result<(), FlashError> {
+        let len = u32::try_from(len).map_err(|_| FlashError::OutOfBounds)?;
+        let end = address.checked_add(len).ok_or(FlashError::OutOfBounds)?;
+        if address < FS_START || end > FS_START + FS_SIZE {
+            return Err(FlashError::OutOfBounds);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "battery-persist-experimental")]
+    fn wait_ready_blocking(&mut self, timeout: Duration) -> Result<(), FlashError> {
+        let start = Instant::now();
+        while self.status()? & 1 != 0 {
+            if start.elapsed() >= timeout {
+                return Err(FlashError::TimedOut);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "battery-persist-experimental")]
+    pub fn fs_read(&mut self, address: u32, data: &mut [u8]) -> Result<(), FlashError> {
+        Self::fs_range(address, data.len())?;
+        self.command_read(&Self::address_command(0x03, address), data)
+    }
+
+    #[cfg(feature = "battery-persist-experimental")]
+    pub fn fs_program(&mut self, address: u32, data: &[u8]) -> Result<(), FlashError> {
+        Self::fs_range(address, data.len())?;
+        let mut offset = 0;
+        while offset < data.len() {
+            let at = address + offset as u32;
+            let size = ((PAGE_SIZE - at % PAGE_SIZE) as usize).min(data.len() - offset);
+            self.write_enable()?;
+            self.spi
+                .transaction(&mut [
+                    Operation::Write(&Self::address_command(0x02, at)),
+                    Operation::Write(&data[offset..offset + size]),
+                ])
+                .map_err(|_| FlashError::Bus)?;
+            self.wait_ready_blocking(Duration::from_millis(100))?;
+            offset += size;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "battery-persist-experimental")]
+    pub fn fs_erase(&mut self, address: u32) -> Result<(), FlashError> {
+        Self::fs_range(address, 4096)?;
+        if address % 4096 != 0 {
+            return Err(FlashError::OutOfBounds);
+        }
+        self.write_enable()?;
+        self.command(&Self::address_command(0x20, address))?;
+        self.wait_ready_blocking(Duration::from_secs(3))
     }
 
     pub async fn erase_secondary(&mut self) -> Result<(), FlashError> {

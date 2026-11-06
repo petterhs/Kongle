@@ -2,12 +2,15 @@
 //! Uses trouble-host with Apache NimBLE controller (no nRF SoftDevice).
 
 use chrono::NaiveDateTime;
+use core::cell::RefCell;
 use embassy_futures::join::join;
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
+    blocking_mutex::{raw::CriticalSectionRawMutex, Mutex as BlockingMutex},
     channel::Sender,
+    mutex::Mutex as AsyncMutex,
     watch::{Receiver, Sender as WatchSender},
 };
+use embassy_time::Instant;
 #[cfg(feature = "ota-activation")]
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
@@ -15,8 +18,8 @@ use trouble_host::prelude::DefaultPacketPool;
 use trouble_host::prelude::*;
 
 use crate::{
-    current_time::parse_cts, dfu, flash::Flash, notifications, notifications::Notification,
-    TimeState, FIRMWARE_VERSION,
+    battery_history::History, current_time::parse_cts, device::battery::BatteryState, dfu,
+    flash::Flash, notifications, notifications::Notification, TimeState, FIRMWARE_VERSION,
 };
 use embedded_hal::spi::SpiDevice;
 
@@ -39,6 +42,28 @@ struct Server {
     // Android's cached GATT database at Kongle's persistent BLE address.
     device_information: DeviceInformationService,
     alert_notification: AlertNotificationService,
+    battery_service: BatteryService,
+    battery_history: BatteryHistoryService,
+}
+
+#[gatt_service(uuid = "0000180f-0000-1000-8000-00805f9b34fb")]
+struct BatteryService {
+    #[characteristic(uuid = "00002a19-0000-1000-8000-00805f9b34fb", read)]
+    battery_level: u8,
+}
+
+#[gatt_service(uuid = "6b6f0000-1886-4b40-ae7d-00a11ce50001")]
+struct BatteryHistoryService {
+    /// millivolts LE, percent, charging (0 or 1)
+    #[characteristic(uuid = "6b6f0001-1886-4b40-ae7d-00a11ce50001", read)]
+    current: [u8; 4],
+    /// Read the page selected by a cursor write.
+    #[characteristic(uuid = "6b6f0002-1886-4b40-ae7d-00a11ce50001", read)]
+    page: heapless09::Vec<u8, 240>,
+    #[characteristic(uuid = "6b6f0003-1886-4b40-ae7d-00a11ce50001", write)]
+    cursor: [u8; 4],
+    #[characteristic(uuid = "6b6f0004-1886-4b40-ae7d-00a11ce50001", write)]
+    epoch: [u8; 4],
 }
 
 /// Furu writes InfiniTime-compatible New Alert payloads here.
@@ -106,10 +131,12 @@ pub async fn run<C, S>(
     set_time_tx: Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
     connected_tx: WatchSender<'static, CriticalSectionRawMutex, bool, 2>,
     notification_tx: Sender<'static, CriticalSectionRawMutex, Notification, 2>,
-    mut flash: Flash<S>,
+    flash: &'static AsyncMutex<CriticalSectionRawMutex, Flash<S>>,
+    mut battery_rx: Receiver<'static, CriticalSectionRawMutex, BatteryState, 2>,
+    history: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<History>>,
 ) where
     C: Controller + 'static,
-    S: SpiDevice<u8>,
+    S: SpiDevice<u8> + 'static,
 {
     let address = Address::random(address);
     defmt::info!("BLE address = {:?}", address);
@@ -145,6 +172,9 @@ pub async fn run<C, S>(
     if let Some(t) = time_rx.try_changed() {
         let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
     }
+    if let Some(battery) = battery_rx.try_get() {
+        publish_battery(server, battery);
+    }
     let _ = join(ble_task(runner), async {
         loop {
             match advertise("Kongle", &mut peripheral).await {
@@ -161,7 +191,9 @@ pub async fn run<C, S>(
                                     &mut time_rx,
                                     &set_time_tx,
                                     &notification_tx,
-                                    &mut flash,
+                                    flash,
+                                    &mut battery_rx,
+                                    history,
                                 )
                                 .await;
                                 connected_tx.send(false);
@@ -203,19 +235,24 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
     time_rx: &mut Receiver<'static, CriticalSectionRawMutex, TimeState, 2>,
     set_time_tx: &Sender<'static, CriticalSectionRawMutex, NaiveDateTime, 1>,
     notification_tx: &Sender<'static, CriticalSectionRawMutex, Notification, 2>,
-    flash: &mut Flash<S>,
+    flash: &AsyncMutex<CriticalSectionRawMutex, Flash<S>>,
+    battery_rx: &mut Receiver<'static, CriticalSectionRawMutex, BatteryState, 2>,
+    history: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<History>>,
 ) {
-    let mut dfu = dfu::Receiver::new(flash);
+    let mut dfu = dfu::Receiver::new();
     // Time updates are not consumed while advertising. Publish the latest one
     // before the newly connected client can read the shared GATT attribute.
     if let Some(t) = time_rx.try_changed() {
         let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
     }
+    if let Some(battery) = battery_rx.try_changed() {
+        publish_battery(server, battery);
+    }
 
     // Keep the GATT listener alive for the entire connection. Cancelling even
     // conn.next() on each clock tick can lose an unacknowledged DFU packet;
     // Furu then waits forever for a receipt at the requested packet count.
-    let _ = embassy_futures::select::select(
+    let gatt_and_time = embassy_futures::select::select(
         async {
             loop {
                 match conn.next().await {
@@ -226,6 +263,44 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                     GattConnectionEvent::Gatt { event } => {
                         let mut dfu_reply = None;
                         let error = match &event {
+                            GattEvent::Write(write)
+                                if write.handle() == server.battery_history.epoch.handle =>
+                            {
+                                if let Ok(epoch) = <[u8; 4]>::try_from(write.data()) {
+                                    let epoch = u32::from_le_bytes(epoch);
+                                    if epoch < 1_700_000_000 {
+                                        Some(AttErrorCode::VALUE_NOT_ALLOWED)
+                                    } else {
+                                        history.lock(|h| {
+                                            h.borrow_mut().set_epoch(
+                                                (Instant::now().as_millis() / 1000) as u32,
+                                                epoch,
+                                            )
+                                        });
+                                        None
+                                    }
+                                } else {
+                                    Some(AttErrorCode::INVALID_ATTRIBUTE_VALUE_LENGTH)
+                                }
+                            }
+                            GattEvent::Write(write)
+                                if write.handle() == server.battery_history.cursor.handle =>
+                            {
+                                if let Ok(cursor) = <[u8; 4]>::try_from(write.data()) {
+                                    let page = history.lock(|h| {
+                                        h.borrow().page(
+                                            u32::from_le_bytes(cursor),
+                                            (Instant::now().as_millis() / 1000) as u32,
+                                        )
+                                    });
+                                    let value = heapless09::Vec::<u8, 240>::from_slice(&page)
+                                        .expect("history page fits GATT value");
+                                    let _ = server.set(&server.battery_history.page, &value);
+                                    None
+                                } else {
+                                    Some(AttErrorCode::INVALID_ATTRIBUTE_VALUE_LENGTH)
+                                }
+                            }
                             GattEvent::Write(write)
                                 if write.handle()
                                     == server.current_time_service.current_time.handle =>
@@ -264,7 +339,8 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                                 if write.handle() == server.dfu_service.control_point.handle =>
                             {
                                 let opcode = write.data().first().copied().unwrap_or(0);
-                                match dfu.control(write.data()).await {
+                                let mut flash = flash.lock().await;
+                                match dfu.control(&mut flash, write.data()).await {
                                     Ok(reply) => {
                                         dfu_reply = reply;
                                     }
@@ -279,7 +355,8 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                             GattEvent::Write(write)
                                 if write.handle() == server.dfu_service.packet.handle =>
                             {
-                                match dfu.packet(write.data()).await {
+                                let mut flash = flash.lock().await;
+                                match dfu.packet(&mut flash, write.data()).await {
                                     Ok(reply) => {
                                         dfu_reply = reply;
                                     }
@@ -342,9 +419,23 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                 let _ = server.set(&server.current_time_service.current_time, &encode_cts(&t));
             }
         },
-    )
+    );
+    let _ = embassy_futures::select::select(gatt_and_time, async {
+        loop {
+            publish_battery(server, battery_rx.changed().await);
+        }
+    })
     .await;
     dfu.on_disconnect();
+}
+
+fn publish_battery(server: &Server<'static>, battery: BatteryState) {
+    let _ = server.set(&server.battery_service.battery_level, &battery.percent);
+    let [lo, hi] = battery.mv.to_le_bytes();
+    let _ = server.set(
+        &server.battery_history.current,
+        &[lo, hi, battery.percent, u8::from(battery.charging)],
+    );
 }
 
 /// Advertise and wait for a connection, returning an `Advertiser` handle.
