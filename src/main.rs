@@ -366,6 +366,9 @@ async fn main(spawner: Spawner) {
     let mut config = embassy_nrf::config::Config::default();
     config.hfclk_source = embassy_nrf::config::HfclkSource::ExternalXtal;
     config.lfclk_source = embassy_nrf::config::LfclkSource::ExternalXtal;
+    // PineTime has the external DCC inductor; InfiniTime enables this too.
+    // Allow the regulator to choose the more efficient DC/DC mode under load.
+    config.dcdc.reg1 = true;
     config.gpiote_interrupt_priority = Priority::P2;
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
