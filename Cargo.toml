@@ -1,6 +1,6 @@
 [package]
 name = "kongle"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Petter HS"]
 edition = "2021"
 license = "MIT"
