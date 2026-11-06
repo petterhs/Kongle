@@ -95,15 +95,15 @@ MCUBoot menu.
 
 The optional `touch-wake-debug` feature keeps touch scanning while the display
 is asleep, so a tap or swipe can wake a development watch with a stuck button.
-It is excluded from OTA firmware at compile time because its power use has not
-been measured. Flash a ST-Link development watch with:
+Its power use has not been measured, so release OTA packages leave it off.
+Flash a ST-Link development watch that can also receive OTA updates with:
 
 ```bash
-KONGLE_FEATURES=mcuboot,touch-wake-debug bash scripts/flash_app.sh
+KONGLE_FEATURES=mcuboot,ota-activation,touch-wake-debug bash scripts/flash_app.sh
 ```
 
-This build does not accept OTA updates. To return to an OTA-capable build, flash
-with `KONGLE_FEATURES=mcuboot,ota-activation`. After flashing, use the MCUBoot
+`touch-wake-debug` is independent of OTA support; a build with only
+`mcuboot,touch-wake-debug` still rejects OTA. After flashing, use the MCUBoot
 RTT command below. Look for `Touch CST816S initialized`, `Touch gesture`, and
 `Touch wake` logs while checking all four swipe directions, taps, sleep/wake,
 and the button hold. Test this on the ST-Link development watch before using it

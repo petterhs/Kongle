@@ -68,8 +68,8 @@ mcuboot = []
 ota-staging = ["mcuboot"]
 # Development-board-only trial boot. Leaves image_ok erased so reset reverts.
 ota-activation = ["ota-staging"]
-# ST-Link development builds only. OTA packages must not keep the touch
-# controller scanning while the screen is asleep.
+# Development builds only. Keep this out of release OTA packages: touch
+# scanning during sleep has not been measured for battery impact.
 touch-wake-debug = []
 
 [workspace]
