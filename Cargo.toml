@@ -64,9 +64,9 @@ default = []
 baremetal = []
 # Link for MCUBoot primary slot (0x08200). Use for scripts/flash_app.sh; omit for cargo run --release.
 mcuboot = []
-# Opt-in development-board receiver. Default builds never erase external flash.
+# BLE receiver; included by ota-activation. Standalone builds do not enable it.
 ota-staging = ["mcuboot"]
-# Development-board-only trial boot. Leaves image_ok erased so reset reverts.
+# Trial boot support. Leaves image_ok erased so reset reverts.
 ota-activation = ["ota-staging"]
 # Development builds only. Keep this out of release OTA packages: touch
 # scanning during sleep has not been measured for battery impact.

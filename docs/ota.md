@@ -1,14 +1,19 @@
 # Kongle OTA development sequence
 
-This branch provides an **opt-in trial updater** for the ST-Link development
-board. Builds with `--features mcuboot,ota-activation` accept application-only
+Builds with `--features mcuboot,ota-activation` accept application-only
 Nordic legacy DFU from Furu, erase and program the external secondary slot,
 read it back, mark it for an MCUBoot **test swap**, and show transfer progress
 on the watch. The `ota-staging` feature alone still rejects final validation.
-Ordinary builds do not erase external flash. Neither feature confirms a trial
+Standalone builds do not erase external flash. Neither feature confirms a trial
 image: a subsequent reset should revert to the prior firmware.
-Keep the daily-driver watch on InfiniTime until the complete flow has passed
-development-board testing.
+
+Before updating *from InfiniTime*, open Settings → Firmware on the watch and
+confirm that the running image is validated. [InfiniTime 1.16.1's DFU
+receiver](https://github.com/InfiniTimeOrg/InfiniTime/blob/1.16.1/src/components/ble/DfuService.cpp)
+erases the secondary slot at the start of an update even if the current image
+is still a trial. That slot may contain the only rollback copy. Its `Image OK`
+message confirms the transfer CRC; it does not confirm that MCUBoot selected
+the new image.
 
 ## Boot and recovery
 
@@ -16,8 +21,8 @@ The pinned PineTime bootloader 1.0.1 owns the image swap and its button menu.
 It samples the button for about five seconds after startup: hold through blue
 to revert to the previous image, or through red to load recovery firmware.
 Kongle now restarts after a three-second hold when built with `mcuboot`, so
-continue holding through the bootloader's menu. A short press still changes
-brightness. The standalone build does not use the long hold to reset.
+continue holding through the bootloader's menu. A short press toggles the
+display. The standalone build does not use the long hold to reset.
 
 The bootloader's watchdog reverts an unconfirmed trial image after a reset.
 Kongle feeds that watchdog but does **not** confirm the image. A
@@ -41,12 +46,11 @@ before erasing the rest. It never touches bootloader assets below `0x40000` or
 the filesystem above `0xB4000`.
 
 Inside `devenv shell`, build and flash the development board with
-`KONGLE_FEATURES=mcuboot,ota-activation bash scripts/flash_app.sh`. Generate a
-matching test package with
-`KONGLE_FEATURES=mcuboot,ota-activation bash scripts/build-dfu-package.sh`.
+`bash scripts/flash_app.sh`. Generate a matching test package with
+`bash scripts/build-dfu-package.sh`.
 This produces `kongle-mcuboot-app-dfu-<version>.zip` under the MCUBoot build
-directory. The default `scripts/flash_app.sh` build uses `mcuboot` alone and
-does not enable staging.
+directory. These scripts default to `mcuboot,ota-activation`; set
+`KONGLE_FEATURES` explicitly to test a different feature set.
 The activation validator also accepts InfiniTime's application-only MCUBoot
 DFU ZIPs. InfiniTime 1.16.1 uses a 32-byte image header, whereas Kongle's
 image has a 512-byte header. It reads the header length from each image and

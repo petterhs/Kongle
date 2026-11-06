@@ -3,9 +3,8 @@ set -euo pipefail
 
 # Build a MCUBoot-wrapped image for the Kongle firmware.
 #
-# This script builds the firmware with --features mcuboot (FLASH at 0x08200),
-# or KONGLE_FEATURES=mcuboot,ota-staging for opt-in staging tests,
-# then wraps it with imgtool. It expects "imgtool" and the cross toolchain on PATH.
+# This script builds OTA-capable trial firmware at FLASH address 0x08200,
+# then wraps it with imgtool. Override KONGLE_FEATURES for other builds.
 #
 # It produces:
 # - target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/kongle.bin
@@ -32,7 +31,7 @@ if [[ -d "${MCUBOOT_TARGET_DIR}" ]] && ! [[ -w "${MCUBOOT_TARGET_DIR}" ]]; then
   exit 1
 fi
 
-FEATURES="${KONGLE_FEATURES:-mcuboot}"
+FEATURES="${KONGLE_FEATURES:-mcuboot,ota-activation}"
 if [[ ",${FEATURES}," != *",mcuboot,"* ]]; then
   echo "KONGLE_FEATURES must include mcuboot" >&2
   exit 1
