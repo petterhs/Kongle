@@ -572,7 +572,12 @@ async fn main(spawner: Spawner) {
                 if let InputEvent::Touch(gesture) = event {
                     if awake {
                         sleep_at = Instant::now() + Duration::from_secs(30);
-                        if watch_ui.handle_touch(gesture) {
+                        let previous_brightness = watch_ui.brightness_level();
+                        let needs_redraw = watch_ui.handle_touch(gesture);
+                        if watch_ui.brightness_level() != previous_brightness {
+                            backlight.set(watch_ui.brightness_level());
+                            watch_ui.draw_brightness_selection(&mut display);
+                        } else if needs_redraw {
                             redraw = true;
                         }
                     }
@@ -655,7 +660,7 @@ async fn main(spawner: Spawner) {
             );
             redraw = false;
             SCREEN_AWAKE_WATCH.sender().send(true);
-            backlight.set(7);
+            backlight.set(watch_ui.brightness_level());
             if waking {
                 defmt::info!("Display awake");
             }
