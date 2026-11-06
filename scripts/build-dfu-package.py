@@ -9,6 +9,9 @@ import tomllib
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
+MAX_IMAGE_SIZE = 0x74000 - 16
+INFINITIME_DFU_BUFFER_SIZE = 200
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -17,10 +20,21 @@ def main() -> None:
     arguments = parser.parse_args()
 
     image = arguments.image.read_bytes()
-    if not 0x200 <= len(image) <= 0x74000 - 16:
+    if not 0x200 <= len(image) <= MAX_IMAGE_SIZE:
         parser.error("image does not fit the PineTime secondary slot")
     if image[:4] != bytes.fromhex("3db8f396") or image[8:10] != bytes.fromhex("0002"):
         parser.error("input is not a PineTime MCUBoot image with a 0x200-byte header")
+
+    # InfiniTime 1.16.1 writes MCUBoot's pending-image magic only when its
+    # final 200-byte DFU buffer is partially filled. An exact multiple takes
+    # the full-buffer branch and never calls WriteMagicNumber(), despite
+    # reporting "Image OK". Keep the signed image/TLV unchanged and append
+    # erased bytes outside it so the final DFU write has a short remainder.
+    # https://github.com/InfiniTimeOrg/InfiniTime/blob/1.16.1/src/components/ble/DfuService.cpp
+    if len(image) % INFINITIME_DFU_BUFFER_SIZE == 0:
+        image += b"\xff" * 4
+    if len(image) > MAX_IMAGE_SIZE:
+        parser.error("DFU padding would exceed the PineTime secondary slot")
 
     version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
     major, minor, patch = (int(part) for part in version.split("."))
