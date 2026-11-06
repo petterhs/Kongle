@@ -49,8 +49,15 @@ Inside `devenv shell`, build and flash the development board with
 `bash scripts/flash_app.sh`. Generate a matching test package with
 `bash scripts/build-dfu-package.sh`.
 This produces `kongle-mcuboot-app-dfu-<version>.zip` under the MCUBoot build
+<<<<<<< HEAD
 directory. These scripts default to `mcuboot,ota-activation`; set
 `KONGLE_FEATURES` explicitly to test a different feature set.
+The package builder appends four erased bytes when the MCUBoot image length is
+an exact multiple of 200. [InfiniTime 1.16.1's DFU receiver](https://github.com/InfiniTimeOrg/InfiniTime/blob/1.16.1/src/components/ble/DfuService.cpp)
+only writes MCUBoot's pending-image marker from its partially filled final
+200-byte buffer. Without this padding it can show `Image OK` but then reboot
+straight into the old firmware. The padding is outside the image's hashed
+payload and TLV; the init-packet CRC covers the padded DFU bytes.
 The activation validator also accepts InfiniTime's application-only MCUBoot
 DFU ZIPs. InfiniTime 1.16.1 uses a 32-byte image header, whereas Kongle's
 image has a 512-byte header. It reads the header length from each image and

@@ -48,6 +48,7 @@ chrono = { version = "0.4.43", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["async-await"] }
 static_cell = "1.3"
 byte-slice-cast = { version = "1.2.3", default-features = false }
+littlefs2 = { version = "0.8.1", default-features = false, features = ["c-stubs"], optional = true }
 
 # Debugging and panic
 defmt = "1.0.1"
@@ -71,6 +72,8 @@ ota-activation = ["ota-staging"]
 # Development builds only. Keep this out of release OTA packages: touch
 # scanning during sleep has not been measured for battery impact.
 touch-wake-debug = []
+# Mount InfiniTime's LittleFS for reboot-persistent battery samples.
+battery-persist-experimental = ["dep:littlefs2"]
 
 [workspace]
 members = ["tests/host"]

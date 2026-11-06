@@ -11,7 +11,7 @@ Kongle is an [Embassy](https://embassy.dev/)-based Rust firmware for the [PineTi
 - [x] BLE
   - [x] trouble-host using apache-nimble
   - [x] Simple time sync
-  - [ ] Battery reporting
+  - [x] Battery reporting (BAS percentage and Kongle voltage/charging history)
   - [ ] Steps
   - [x] Notifications (volatile four-alert inbox through Furu)
   - [ ] Heartbeat sensor
@@ -72,6 +72,11 @@ bootloader watchdog continue while the display is asleep. An incoming OTA
 transfer wakes the display to show progress and keeps it awake through
 validation. Measure battery runtime on hardware before relying on this as a
 full low-power mode.
+
+Kongle enables the nRF52832's REG1 DC/DC converter, as InfiniTime does. The
+[PineTime V1 schematic](https://files.pine64.org/doc/PineTime/PinTime%20Schematic-V1.0-20191020.pdf)
+shows the required DCC inductor. The effect on whole-watch battery life has
+not yet been measured; compare similar battery-discharge runs in Furu.
 
 The planned screen and menu architecture, input sequence, and graphics crate
 choices are recorded in [Watch UI direction](docs/ui.md).

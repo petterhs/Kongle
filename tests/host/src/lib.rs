@@ -1,5 +1,9 @@
 // Compile the hardware-independent firmware modules on the host.
 #![allow(dead_code)]
+#[path = "../../../src/battery_history.rs"]
+mod battery_history;
+#[path = "../../../src/battery_record.rs"]
+mod battery_record;
 #[path = "../../../src/current_time.rs"]
 mod current_time;
 #[path = "../../../src/device/display.rs"]
@@ -16,6 +20,53 @@ mod touch;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn battery_history_keeps_charging_edges_and_paginates_after_wrap() {
+        let mut history = battery_history::History::new();
+        assert!(history.record(0, 3900, 70, false).is_some());
+        assert!(history.record(10, 3900, 70, false).is_none());
+        assert!(history.record(11, 3920, 70, true).is_some());
+        for i in 1..=battery_history::CAPACITY {
+            assert!(history
+                .record(11 + i as u32 * 300, 3900, 70, true)
+                .is_some());
+        }
+        let page = history.page(0, 200_000);
+        assert_eq!(page[0], 1);
+        assert_eq!(u32::from_le_bytes(page[1..5].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(page[5..9].try_into().unwrap()), 20);
+        assert_eq!(page[9], 18);
+        assert_eq!(page.len(), 14 + 18 * 12);
+    }
+
+    #[test]
+    fn battery_flash_record_survives_round_trip_and_rejects_torn_write() {
+        let sample = battery_history::Sample {
+            uptime_secs: 900,
+            epoch_secs: 1_783_000_000,
+            mv: 3837,
+            percent: 60,
+            charging: true,
+        };
+        let mut record = battery_record::encode(sample);
+        assert_eq!(battery_record::decode(&record), Some(sample));
+        record[9] ^= 1;
+        assert_eq!(battery_record::decode(&record), None);
+    }
+
+    #[test]
+    fn battery_history_starts_a_new_interval_after_reboot() {
+        let mut history = battery_history::History::new();
+        history.restore(battery_history::Sample {
+            uptime_secs: 24 * 60 * 60,
+            epoch_secs: 1_783_000_000,
+            mv: 3750,
+            percent: 50,
+            charging: false,
+        });
+        assert!(history.record(3, 3740, 50, false).is_some());
+    }
 
     #[test]
     fn alert_inbox_accepts_furu_payload_and_keeps_four_newest() {
