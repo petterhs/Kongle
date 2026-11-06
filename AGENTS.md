@@ -12,7 +12,7 @@ It explains the technologies used and how the development environment is configu
 - **Async framework**: `embassy-executor`, `embassy-nrf`, `embassy-time`, `embassy-sync`, `embassy-futures`, `embassy-embedded-hal`.
 - **BLE stack**: `apache-nimble`, `trouble-host`, `trouble-host-macros`, `bt-hci`.
 - **Display and graphics**: `embedded-graphics`, `st7789`, `mipidsi`.
-- **Embedded HALs and utilities**: `embedded-hal`, `embedded-hal-async`, `embedded-hal-bus`, `embedded-io`, `embedded-io-async`, `embedded-storage`, `embedded-storage-async`, `heapless`, `chrono`, `futures`, `static_cell`, `byte-slice-cast`, `debouncr`.
+- **Embedded HALs and utilities**: `embedded-hal`, `embedded-hal-async`, `embedded-hal-bus`, `embedded-io`, `embedded-io-async`, `embedded-storage`, `embedded-storage-async`, `heapless`, `chrono`, `futures`, `static_cell`, `byte-slice-cast`.
 - **Debugging and runtimes**: `defmt`, `defmt-rtt`, `panic-probe`, `cortex-m`, `cortex-m-rt`.
 
 See `Cargo.toml` for the complete and authoritative list.
