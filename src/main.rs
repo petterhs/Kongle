@@ -309,6 +309,12 @@ async fn main(spawner: Spawner) {
     let mut config = embassy_nrf::config::Config::default();
     config.hfclk_source = embassy_nrf::config::HfclkSource::ExternalXtal;
     config.lfclk_source = embassy_nrf::config::LfclkSource::ExternalXtal;
+    #[cfg(feature = "dcdc-experimental")]
+    {
+        // The PineTime schematic includes the DCC inductor. Keep this opt-in
+        // until boot and BLE have been checked on the actual board revision.
+        config.dcdc.reg1 = true;
+    }
     config.gpiote_interrupt_priority = Priority::P2;
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);

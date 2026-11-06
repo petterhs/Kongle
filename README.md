@@ -73,6 +73,14 @@ transfer wakes the display to show progress and keeps it awake through
 validation. Measure battery runtime on hardware before relying on this as a
 full low-power mode.
 
+For a development-board power trial, build with
+`KONGLE_FEATURES=mcuboot,dcdc-experimental bash scripts/flash_app.sh`.
+This opts into the nRF52832's REG1 DC/DC converter; ordinary firmware builds
+do not request it. The [PineTime V1 schematic](https://files.pine64.org/doc/PineTime/PinTime%20Schematic-V1.0-20191020.pdf)
+shows the required DCC inductor, but check the target board revision and verify
+boot, BLE reconnection, and OTA on the development unit before using this
+feature on a closed watch.
+
 The planned screen and menu architecture, input sequence, and graphics crate
 choices are recorded in [Watch UI direction](docs/ui.md).
 
