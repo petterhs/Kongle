@@ -19,6 +19,7 @@ defmt-print -e target/thumbv7em-none-eabihf/release/kongle </dev/null
 defmt-print -e target/mcuboot/thumbv7em-none-eabihf/release/kongle </dev/null
 imgtool verify target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/pinetime-mcuboot-app-image.bin
 python -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/build-dfu-package.py").read_text())'
+python -m unittest discover -s tests -p 'test_dfu_package.py'
 for script in scripts/*.sh; do
     bash -n "$script"
 done
