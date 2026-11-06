@@ -6,13 +6,14 @@ mod navigation;
 use core::fmt::Write;
 
 use chrono::Datelike;
+use eg_seven_segment::{SevenSegmentStyle, SevenSegmentStyleBuilder};
 use embedded_graphics::{
     image::Image,
     mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
-    text::Text,
+    text::{Baseline, Text},
 };
 use embedded_iconoir::{
     icons::size24px::{connectivity::Bluetooth, system},
@@ -23,7 +24,6 @@ use heapless::String;
 
 use crate::{
     device::{battery::BatteryState, display as cfg},
-    fonts::JETBRAINS_FONT_54_POINT_EXTRA_BOLD,
     notifications::{Inbox, Notification},
     ota::UpdateStatus,
     touch::TouchEvent,
@@ -98,6 +98,16 @@ fn draw_ascii_lines<D: DrawTarget<Color = Rgb565>>(
         let _ = Text::new(line_text, Point::new(20, y + line as i32 * 23), style).draw(display);
         start = end;
     }
+}
+
+fn clock_digits() -> SevenSegmentStyle<Rgb565> {
+    SevenSegmentStyleBuilder::new()
+        .digit_size(Size::new(42, 70))
+        .digit_spacing(6)
+        .segment_width(7)
+        .segment_color(cfg::TEXT_COLOR)
+        .inactive_segment_color(Rgb565::new(1, 2, 1))
+        .build()
 }
 
 fn update_text(status: UpdateStatus) -> String<22> {
@@ -241,19 +251,15 @@ impl WatchUi {
         {
             let pos = Point::new(cfg::TIME_POS_X, cfg::TIME_POS_Y);
             if !self.skip_clear {
-                cfg::text_bounds(&JETBRAINS_FONT_54_POINT_EXTRA_BOLD, cfg::TIME_CHARS, pos)
+                Text::with_baseline("88:88", pos, clock_digits(), Baseline::Top)
+                    .bounding_box()
                     .into_styled(clear_style)
                     .draw(display)
                     .ok();
             }
-            let style = MonoTextStyleBuilder::new()
-                .font(&JETBRAINS_FONT_54_POINT_EXTRA_BOLD)
-                .text_color(cfg::TEXT_COLOR)
-                .background_color(cfg::BACKGROUND_COLOR)
-                .build();
             let mut text: String<8> = String::new();
             let _ = write!(&mut text, "{:02}:{:02}", time.hours, time.minutes);
-            let _ = Text::new(&text, pos, style).draw(display);
+            let _ = Text::with_baseline(&text, pos, clock_digits(), Baseline::Top).draw(display);
         }
         self.last_time = Some(time);
     }
