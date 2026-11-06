@@ -72,9 +72,6 @@ ota-activation = ["ota-staging"]
 # ST-Link development builds only. OTA packages must not keep the touch
 # controller scanning while the screen is asleep.
 touch-wake-debug = []
-# Opt-in board trial only: request the nRF52832 REG1 DC/DC converter.
-# Confirm the DCC inductor on the target hardware before enabling.
-dcdc-experimental = []
 
 [workspace]
 members = ["tests/host"]
