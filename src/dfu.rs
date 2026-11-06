@@ -53,8 +53,7 @@ pub fn failure_response(opcode: u8) -> Vec<u8, 5> {
     notification(&[0x10, opcode, 0x05])
 }
 
-pub struct Receiver<'a, S> {
-    flash: &'a mut Flash<S>,
+pub struct Receiver {
     phase: Phase,
     total: u32,
     received: u32,
@@ -66,10 +65,9 @@ pub struct Receiver<'a, S> {
     plan: Option<ActivationPlan>,
 }
 
-impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
-    pub fn new(flash: &'a mut Flash<S>) -> Self {
+impl Receiver {
+    pub fn new() -> Self {
         Self {
-            flash,
             phase: Phase::Idle,
             total: 0,
             received: 0,
@@ -107,7 +105,11 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
         }
     }
 
-    pub async fn control(&mut self, data: &[u8]) -> Result<Option<Vec<u8, 5>>, DfuError> {
+    pub async fn control<S: SpiDevice<u8>>(
+        &mut self,
+        flash: &mut Flash<S>,
+        data: &[u8],
+    ) -> Result<Option<Vec<u8, 5>>, DfuError> {
         match data {
             [0x01, 0x04] if matches!(self.phase, Phase::Idle | Phase::Failed | Phase::Staged) => {
                 if !cfg!(feature = "ota-staging") {
@@ -128,7 +130,7 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
                     );
                     return Err(DfuError::UnconfirmedTrial);
                 }
-                self.flash.initialize().await?;
+                flash.initialize().await?;
                 self.phase = Phase::Sizes;
                 self.total = 0;
                 self.received = 0;
@@ -170,14 +172,13 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
             [0x04] if self.phase == Phase::Received => {
                 OTA_WATCH.sender().send(UpdateStatus::Validating);
                 let mut header = [0; 16];
-                self.flash.read(SECONDARY_SLOT_START, &mut header)?;
+                flash.read(SECONDARY_SLOT_START, &mut header)?;
                 let mut crc = 0xffff;
                 let mut offset = 0;
                 let mut buffer = [0; 200];
                 while offset < self.total {
                     let size = (self.total - offset).min(buffer.len() as u32) as usize;
-                    self.flash
-                        .read(SECONDARY_SLOT_START + offset, &mut buffer[..size])?;
+                    flash.read(SECONDARY_SLOT_START + offset, &mut buffer[..size])?;
                     crc = crc16_update(crc, &buffer[..size]);
                     offset += size as u32;
                     Timer::after(Duration::from_millis(1)).await;
@@ -228,7 +229,7 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
                 #[cfg(feature = "ota-activation")]
                 {
                     let plan = self.plan.take().ok_or(DfuError::Protocol)?;
-                    self.flash.mark_trial_pending(plan).await?;
+                    flash.mark_trial_pending(plan).await?;
                     defmt::info!("DFU trial marker verified; restarting into MCUBoot");
                     self.phase = Phase::Activating;
                     OTA_WATCH.sender().send(UpdateStatus::ReadyToRestart);
@@ -243,14 +244,18 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
         }
     }
 
-    pub async fn packet(&mut self, data: &[u8]) -> Result<Option<Vec<u8, 5>>, DfuError> {
+    pub async fn packet<S: SpiDevice<u8>>(
+        &mut self,
+        flash: &mut Flash<S>,
+        data: &[u8],
+    ) -> Result<Option<Vec<u8, 5>>, DfuError> {
         match self.phase {
             Phase::Sizes => {
                 let total = parse_application_size(data).ok_or(DfuError::InvalidImage)?;
                 defmt::info!("DFU application size: {} bytes", total);
                 self.total = total;
                 OTA_WATCH.sender().send(UpdateStatus::Erasing);
-                self.flash.erase_secondary().await?;
+                flash.erase_secondary().await?;
                 defmt::info!("DFU ready for init packet");
                 self.phase = Phase::InitStart;
                 Ok(Some(notification(&[0x10, 0x01, 0x01])))
@@ -268,7 +273,7 @@ impl<'a, S: SpiDevice<u8>> Receiver<'a, S> {
                 if self.packet_count == 0 {
                     defmt::info!("DFU first image packet: {} bytes", data.len());
                 }
-                self.flash
+                flash
                     .write_image(SECONDARY_SLOT_START + self.received, data)
                     .await?;
                 self.received += data.len() as u32;

@@ -11,7 +11,7 @@ Kongle is an [Embassy](https://embassy.dev/)-based Rust firmware for the [PineTi
 - [x] BLE
   - [x] trouble-host using apache-nimble
   - [x] Simple time sync
-  - [ ] Battery reporting
+  - [x] Battery reporting (BAS percentage and Kongle voltage/charging history)
   - [ ] Steps
   - [x] Notifications (volatile four-alert inbox through Furu)
   - [ ] Heartbeat sensor

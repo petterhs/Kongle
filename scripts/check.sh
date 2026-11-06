@@ -10,7 +10,9 @@ cargo test --locked --manifest-path tests/host/Cargo.toml --target "$(rustc -vV 
 cargo clippy --locked --release --features mcuboot
 cargo clippy --locked --release --features mcuboot,ota-staging
 cargo clippy --locked --release --features mcuboot,ota-activation
+cargo clippy --locked --release --features mcuboot,ota-activation,battery-persist-experimental
 cargo build --locked --release
+cargo build --locked --release --features mcuboot,ota-activation,battery-persist-experimental
 KONGLE_FEATURES=mcuboot,ota-staging bash scripts/build-dfu-package.sh
 bash scripts/build-mcuboot-image.sh
 defmt-print -e target/thumbv7em-none-eabihf/release/kongle </dev/null
