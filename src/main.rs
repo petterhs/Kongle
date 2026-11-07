@@ -101,7 +101,7 @@ static INPUT_CH: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new(
 static NOTIFICATION_CH: Channel<CriticalSectionRawMutex, notifications::Notification, 2> =
     Channel::new();
 static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 1> = Watch::new();
-static VIBRATION_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static VIBRATION_SIGNAL: Signal<CriticalSectionRawMutex, Instant> = Signal::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
 static FLASH_CELL: StaticCell<AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>> =
     StaticCell::new();
@@ -372,15 +372,15 @@ async fn vibration_task(
     timer: HardwareTimer<'static>,
     _shutdown: Ppi<'static, embassy_nrf::peripherals::PPI_CH0, 1, 1>,
 ) {
+    VIBRATION_SIGNAL.wait().await;
     loop {
-        VIBRATION_SIGNAL.wait().await;
         motor.out();
         timer.clear();
         timer.cc(0).clear_events();
+        let deadline = Instant::now() + Duration::from_millis(50);
         timer.start();
         Timer::after(Duration::from_millis(50)).await;
-        // Coalesce notification bursts into one short pulse.
-        VIBRATION_SIGNAL.reset();
+        while VIBRATION_SIGNAL.wait().await < deadline {}
     }
 }
 
@@ -728,7 +728,7 @@ async fn main(spawner: Spawner) {
                 );
                 watch_ui.receive_notification(notification, show);
                 if watch_ui.vibration_enabled() {
-                    VIBRATION_SIGNAL.signal(());
+                    VIBRATION_SIGNAL.signal(Instant::now());
                 }
                 defmt::info!("[ans] notification stored; preview={}", show);
                 if show {
