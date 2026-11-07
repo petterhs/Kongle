@@ -26,6 +26,9 @@ use embassy_nrf::saadc;
 use embassy_nrf::spim::{Config as SpimConfig, Frequency, Spim, MODE_3};
 use embassy_nrf::{
     gpio::{Input, Level, Output, OutputDrive, Pull},
+    gpiote::{OutputChannel as GpioteOutput, OutputChannelPolarity},
+    ppi::Ppi,
+    timer::{Frequency as TimerFrequency, Timer as HardwareTimer},
     twim::{Config as TwimConfig, Twim},
 };
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
@@ -362,14 +365,20 @@ async fn ble_peripheral_task(
 }
 
 /// PineTime's active-low motor output, matching InfiniTime's MotorController.
-/// Own the pulse timer here so drawing and BLE never wait for the motor.
+/// TIMER2 and PPI switch it off independently of cooperative executor scheduling.
 #[embassy_executor::task]
-async fn vibration_task(mut motor: Output<'static>) {
+async fn vibration_task(
+    motor: GpioteOutput<'static>,
+    timer: HardwareTimer<'static>,
+    _shutdown: Ppi<'static, embassy_nrf::peripherals::PPI_CH0, 1, 1>,
+) {
     loop {
         VIBRATION_SIGNAL.wait().await;
-        motor.set_low();
+        motor.out();
+        timer.clear();
+        timer.cc(0).clear_events();
+        timer.start();
         Timer::after(Duration::from_millis(50)).await;
-        motor.set_high();
         // Coalesce notification bursts into one short pulse.
         VIBRATION_SIGNAL.reset();
     }
@@ -386,8 +395,23 @@ async fn main(spawner: Spawner) {
     config.gpiote_interrupt_priority = Priority::P2;
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
-    let motor = Output::new(p.P0_16, Level::High, OutputDrive::Standard);
-    spawner.spawn(vibration_task(motor)).unwrap();
+    let motor = GpioteOutput::new(
+        p.GPIOTE_CH0,
+        p.P0_16,
+        Level::High,
+        OutputDrive::Standard,
+        OutputChannelPolarity::Toggle,
+    );
+    let timer = HardwareTimer::new(p.TIMER2);
+    timer.set_frequency(TimerFrequency::F1MHz);
+    timer.cc(0).write(50_000);
+    timer.cc(0).short_compare_stop();
+    let mut shutdown =
+        Ppi::new_one_to_one(p.PPI_CH0, timer.cc(0).event_compare(), motor.task_out());
+    shutdown.enable();
+    spawner
+        .spawn(vibration_task(motor, timer, shutdown))
+        .unwrap();
 
     // Adopt an already-running watchdog before BLE initialization and its
     // startup delay. This does not confirm a trial image.
