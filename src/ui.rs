@@ -184,6 +184,7 @@ pub struct WatchUi {
     navigation: Navigation,
     notifications: Inbox,
     show_battery_percent: bool,
+    vibration_enabled: bool,
     brightness: Brightness,
     last_time: Option<TimeState>,
     last_battery: Option<BatteryState>,
@@ -196,6 +197,7 @@ impl WatchUi {
             navigation: Navigation::new(),
             notifications: Inbox::new(),
             show_battery_percent: true,
+            vibration_enabled: true,
             brightness: Brightness::High,
             last_time: None,
             last_battery: None,
@@ -212,6 +214,10 @@ impl WatchUi {
             }
         }
         if self.navigation.page() == Page::Settings {
+            if matches!(event, TouchEvent::Tap { y: 198..=239, .. }) {
+                self.vibration_enabled = !self.vibration_enabled;
+                return true;
+            }
             if let TouchEvent::Tap { x, y: 132..=190 } = event {
                 let next = Brightness::from_touch_x(x);
                 let changed = self.brightness != next;
@@ -237,6 +243,14 @@ impl WatchUi {
 
     pub const fn brightness_level(&self) -> u8 {
         self.brightness.backlight_level()
+    }
+
+    pub const fn vibration_enabled(&self) -> bool {
+        self.vibration_enabled
+    }
+
+    pub fn handle_button(&mut self, awake: bool) -> bool {
+        self.navigation.button(awake)
     }
 
     /// Refresh only the selected brightness labels while the backlight stays on.
@@ -488,12 +502,12 @@ impl WatchUi {
     }
 
     fn draw_page<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
-        let (title, hint) = match self.navigation.page() {
+        let title = match self.navigation.page() {
             Page::Clock => return,
-            Page::Launcher => ("LAUNCHER", "Swipe down: clock"),
-            Page::Notifications => ("NOTIFICATIONS", "Swipe up: clock"),
-            Page::Settings => ("SETTINGS", "Swipe down: back"),
-            Page::About => ("ABOUT", "Swipe down: back"),
+            Page::Launcher => "LAUNCHER",
+            Page::Notifications => "NOTIFICATIONS",
+            Page::Settings => "SETTINGS",
+            Page::About => "ABOUT",
         };
         let style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
@@ -507,7 +521,6 @@ impl WatchUi {
             .build();
         let x = ((cfg::DISPLAY_WIDTH as i32 - title.len() as i32 * 10) / 2).max(0);
         let _ = Text::new(title, Point::new(x, 42), accent).draw(display);
-        let _ = Text::new(hint, Point::new(10, 220), style).draw(display);
         match self.navigation.page() {
             Page::Launcher => {
                 let _ = Text::new("SETTINGS", Point::new(20, 110), style).draw(display);
@@ -544,6 +557,15 @@ impl WatchUi {
                 let _ = brightness_row.draw(display);
                 let _ = Text::new("Brightness", Point::new(20, 157), style).draw(display);
                 self.draw_brightness_selection(display);
+                let vibration = if self.vibration_enabled {
+                    "Vibration: ON"
+                } else {
+                    "Vibration: OFF"
+                };
+                let _ = Rectangle::new(Point::new(10, 198), Size::new(220, 36))
+                    .into_styled(PrimitiveStyle::with_stroke(cfg::ACCENT_COLOR, 1))
+                    .draw(display);
+                let _ = Text::new(vibration, Point::new(20, 223), style).draw(display);
             }
             Page::About => {
                 let _ = Text::new("Kongle", Point::new(20, 110), style).draw(display);

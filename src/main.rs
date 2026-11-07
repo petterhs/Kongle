@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 
+mod battery_estimate;
 mod battery_history;
 #[cfg(feature = "battery-persist-experimental")]
 mod battery_persist;
@@ -25,10 +26,14 @@ use embassy_nrf::saadc;
 use embassy_nrf::spim::{Config as SpimConfig, Frequency, Spim, MODE_3};
 use embassy_nrf::{
     gpio::{Input, Level, Output, OutputDrive, Pull},
+    gpiote::{OutputChannel as GpioteOutput, OutputChannelPolarity},
+    ppi::Ppi,
+    timer::{Frequency as TimerFrequency, Timer as HardwareTimer},
     twim::{Config as TwimConfig, Twim},
 };
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
 use embassy_sync::mutex::Mutex as AsyncMutex;
+use embassy_sync::signal::Signal;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_graphics::prelude::*;
@@ -96,6 +101,7 @@ static INPUT_CH: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new(
 static NOTIFICATION_CH: Channel<CriticalSectionRawMutex, notifications::Notification, 2> =
     Channel::new();
 static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 1> = Watch::new();
+static VIBRATION_SIGNAL: Signal<CriticalSectionRawMutex, Instant> = Signal::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
 static FLASH_CELL: StaticCell<AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>> =
     StaticCell::new();
@@ -358,6 +364,26 @@ async fn ble_peripheral_task(
     .await
 }
 
+/// PineTime's active-low motor output, matching InfiniTime's MotorController.
+/// TIMER2 and PPI switch it off independently of cooperative executor scheduling.
+#[embassy_executor::task]
+async fn vibration_task(
+    motor: GpioteOutput<'static>,
+    timer: HardwareTimer<'static>,
+    _shutdown: Ppi<'static, embassy_nrf::peripherals::PPI_CH0, 1, 1>,
+) {
+    VIBRATION_SIGNAL.wait().await;
+    loop {
+        motor.out();
+        timer.clear();
+        timer.cc(0).clear_events();
+        let deadline = Instant::now() + Duration::from_millis(50);
+        timer.start();
+        Timer::after(Duration::from_millis(50)).await;
+        while VIBRATION_SIGNAL.wait().await < deadline {}
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let mut config = embassy_nrf::config::Config::default();
@@ -369,6 +395,23 @@ async fn main(spawner: Spawner) {
     config.gpiote_interrupt_priority = Priority::P2;
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
+    let motor = GpioteOutput::new(
+        p.GPIOTE_CH0,
+        p.P0_16,
+        Level::High,
+        OutputDrive::Standard,
+        OutputChannelPolarity::Toggle,
+    );
+    let timer = HardwareTimer::new(p.TIMER2);
+    timer.set_frequency(TimerFrequency::F1MHz);
+    timer.cc(0).write(50_000);
+    timer.cc(0).short_compare_stop();
+    let mut shutdown =
+        Ppi::new_one_to_one(p.PPI_CH0, timer.cc(0).event_compare(), motor.task_out());
+    shutdown.enable();
+    spawner
+        .spawn(vibration_task(motor, timer, shutdown))
+        .unwrap();
 
     // Adopt an already-running watchdog before BLE initialization and its
     // startup delay. This does not confirm a trial image.
@@ -628,7 +671,7 @@ async fn main(spawner: Spawner) {
                 )),
             )) => {
                 if matches!(event, InputEvent::ButtonReleased) {
-                    awake = !awake;
+                    awake = watch_ui.handle_button(awake);
                     if awake {
                         redraw = true;
                         sleep_at = Instant::now() + Duration::from_secs(30);
@@ -684,6 +727,9 @@ async fn main(spawner: Spawner) {
                         | UpdateStatus::Validating
                 );
                 watch_ui.receive_notification(notification, show);
+                if watch_ui.vibration_enabled() {
+                    VIBRATION_SIGNAL.signal(Instant::now());
+                }
                 defmt::info!("[ans] notification stored; preview={}", show);
                 if show {
                     awake = true;

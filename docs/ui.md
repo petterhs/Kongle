@@ -35,16 +35,25 @@ swipes independently of hardware; `src/ui/navigation.rs` routes them between
 pages. From the clock, up opens Launcher, down Notifications, right Settings,
 and left About. Swipe down returns from Launcher, Settings, or About; swipe up
 returns from Notifications. Launcher taps open Settings or
-About. Short button press toggles the display; a three-second hold restarts
+About. A short button press wakes on the clock page, returns to the clock
+from another awake page, or sleeps when already on the clock. Navigation
+instructions are not drawn on the watch. A three-second hold restarts
 into the bootloader menu on MCUBoot builds. These inputs need validation on
 the ST-Link watch before using this firmware on a closed watch.
 
 By default, touch scanning stops when the display sleeps, then the controller
 is reset and reinitialized after button wake. The `touch-wake-debug` feature
-keeps scanning and wakes on a touch report. It cannot be combined with
-`ota-staging` or `ota-activation`, so OTA packages cannot include it. Measure
+keeps scanning and wakes on a touch report. It can be combined with OTA
+features for development; normal release builds leave it disabled. Measure
 its battery cost on the development watch before deciding whether a lower
 power touch-wake mode should be offered to daily-driver devices.
+
+Notifications trigger one 50 ms motor pulse, including while the display is
+asleep. Settings → Vibration toggles this behavior independently of receiving
+and displaying notifications. Bursts received during a pulse are coalesced.
+The motor uses active-low P0.16, matching InfiniTime's MotorController.
+Like brightness and battery-percent visibility, this preference is currently
+held in RAM and returns to its default (ON) after a reboot.
 
 ## Dependency choices
 

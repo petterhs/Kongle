@@ -37,6 +37,13 @@ impl Navigation {
         changed
     }
 
+    /// Wake on the clock, return home from other pages, or sleep from home.
+    pub fn button(&mut self, awake: bool) -> bool {
+        let stay_awake = !awake || self.page != Page::Clock;
+        self.clock();
+        stay_awake
+    }
+
     pub fn notifications(&mut self) {
         self.page = Page::Notifications;
         self.stack[0] = Page::Clock;
