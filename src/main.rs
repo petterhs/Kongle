@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 
+mod battery_estimate;
 mod battery_history;
 #[cfg(feature = "battery-persist-experimental")]
 mod battery_persist;
@@ -29,6 +30,7 @@ use embassy_nrf::{
 };
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
 use embassy_sync::mutex::Mutex as AsyncMutex;
+use embassy_sync::signal::Signal;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_graphics::prelude::*;
@@ -96,6 +98,7 @@ static INPUT_CH: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new(
 static NOTIFICATION_CH: Channel<CriticalSectionRawMutex, notifications::Notification, 2> =
     Channel::new();
 static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 1> = Watch::new();
+static VIBRATION_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
 static FLASH_CELL: StaticCell<AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>> =
     StaticCell::new();
@@ -358,6 +361,20 @@ async fn ble_peripheral_task(
     .await
 }
 
+/// PineTime's active-low motor output, matching InfiniTime's MotorController.
+/// Own the pulse timer here so drawing and BLE never wait for the motor.
+#[embassy_executor::task]
+async fn vibration_task(mut motor: Output<'static>) {
+    loop {
+        VIBRATION_SIGNAL.wait().await;
+        motor.set_low();
+        Timer::after(Duration::from_millis(50)).await;
+        motor.set_high();
+        // Coalesce notification bursts into one short pulse.
+        VIBRATION_SIGNAL.reset();
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let mut config = embassy_nrf::config::Config::default();
@@ -369,6 +386,8 @@ async fn main(spawner: Spawner) {
     config.gpiote_interrupt_priority = Priority::P2;
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
+    let motor = Output::new(p.P0_16, Level::High, OutputDrive::Standard);
+    spawner.spawn(vibration_task(motor)).unwrap();
 
     // Adopt an already-running watchdog before BLE initialization and its
     // startup delay. This does not confirm a trial image.
@@ -628,7 +647,7 @@ async fn main(spawner: Spawner) {
                 )),
             )) => {
                 if matches!(event, InputEvent::ButtonReleased) {
-                    awake = !awake;
+                    awake = watch_ui.handle_button(awake);
                     if awake {
                         redraw = true;
                         sleep_at = Instant::now() + Duration::from_secs(30);
@@ -684,6 +703,9 @@ async fn main(spawner: Spawner) {
                         | UpdateStatus::Validating
                 );
                 watch_ui.receive_notification(notification, show);
+                if watch_ui.vibration_enabled() {
+                    VIBRATION_SIGNAL.signal(());
+                }
                 defmt::info!("[ans] notification stored; preview={}", show);
                 if show {
                     awake = true;

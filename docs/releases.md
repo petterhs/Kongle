@@ -51,3 +51,16 @@ devenv shell -- bash scripts/release-notes.sh vX.Y.Z /tmp/kongle-release-notes.m
 The maintainer reviews the GitHub Release notes and verifies the ZIP with the
 development watch before recommending a release to daily-driver users. Release
 publication does not automatically confirm firmware on a watch.
+
+## Promoting a release candidate
+
+Keep the candidate's hardware checklist in its release notes and record the
+tested watch, firmware tag and results. Schedule a review after two days of
+daily use. When the checklist passes, publish the stable tag on that same
+tested commit (`v0.3.1-rc.1` → `v0.3.1`); this needs no new feature work.
+If there are fixes, use `rc.2` and repeat the affected checks. Do not silently
+promote a candidate merely because time passed.
+
+For Furu candidates, also verify the signed APK upgrades the installed normal
+app without losing devices/settings, notification forwarding, reconnect after
+DFU, firmware download and battery-history charts before tagging stable.

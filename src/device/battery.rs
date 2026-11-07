@@ -1,3 +1,4 @@
+use crate::battery_estimate::percent_from_mv;
 use defmt::Format;
 use embassy_nrf::gpio::Input;
 use embassy_nrf::saadc::Saadc;
@@ -31,7 +32,7 @@ impl<'d> Battery<'d> {
         }
     }
 
-    /// Update battery status by reading from hardware (placeholder)
+    /// Read voltage and charging state, then estimate the remaining charge.
     pub async fn update(&mut self) -> BatteryState {
         let mut buf = [0i16; 1];
         self.saadc.sample(&mut buf).await;
@@ -65,20 +66,4 @@ fn adc_to_mv(raw: i16) -> u16 {
     let adc_mv = raw * 3600 / 4096;
     let battery_mv = adc_mv * 2;
     battery_mv as u16
-}
-
-fn percent_from_mv(mv: u16) -> u8 {
-    match mv {
-        v if v >= 4200 => 100,
-        v if v >= 4100 => 90,
-        v if v >= 4000 => 80,
-        v if v >= 3900 => 70,
-        v if v >= 3800 => 60,
-        v if v >= 3700 => 50,
-        v if v >= 3600 => 40,
-        v if v >= 3500 => 30,
-        v if v >= 3400 => 20,
-        v if v >= 3300 => 10,
-        _ => 0,
-    }
 }

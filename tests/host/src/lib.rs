@@ -1,5 +1,7 @@
 // Compile the hardware-independent firmware modules on the host.
 #![allow(dead_code)]
+#[path = "../../../src/battery_estimate.rs"]
+mod battery_estimate;
 #[path = "../../../src/battery_history.rs"]
 mod battery_history;
 #[path = "../../../src/battery_record.rs"]
@@ -20,6 +22,42 @@ mod touch;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn battery_estimate_has_one_percent_steps_and_saturates() {
+        use battery_estimate::percent_from_mv;
+        assert_eq!(percent_from_mv(0), 0);
+        assert_eq!(percent_from_mv(3199), 0);
+        for percent in 0..=100u16 {
+            assert_eq!(percent_from_mv(3200 + percent * 10), percent as u8);
+        }
+        assert_eq!(percent_from_mv(3837), 63);
+        assert_eq!(percent_from_mv(u16::MAX), 100);
+        for mv in 1..=u16::MAX {
+            assert!(percent_from_mv(mv) >= percent_from_mv(mv - 1));
+        }
+    }
+
+    #[test]
+    fn button_wakes_home_returns_home_and_sleeps_from_home() {
+        use navigation::{Navigation, Page};
+        use touch::TouchEvent::*;
+        for gesture in [SwipeUp, SwipeDown, SwipeLeft, SwipeRight] {
+            for awake in [false, true] {
+                let mut nav = Navigation::new();
+                nav.handle(gesture);
+                assert!(nav.button(awake));
+                assert_eq!(nav.page(), Page::Clock);
+                // Returning home must also empty the old back stack.
+                assert!(nav.handle(SwipeDown));
+                assert_eq!(nav.page(), Page::Notifications);
+                assert!(nav.handle(SwipeUp));
+                assert_eq!(nav.page(), Page::Clock);
+                assert!(!nav.button(true));
+                assert!(nav.button(false));
+            }
+        }
+    }
 
     #[test]
     fn battery_history_keeps_charging_edges_and_paginates_after_wrap() {

@@ -21,8 +21,12 @@ samples near the same timestamp. No records are deleted on read.
 The RAM ring keeps 512 samples, recorded every five minutes and on charging
 state changes. This covers at least 42 hours at the base cadence, less when
 many charging transitions occur. Furu anchors unsynced uptime samples to
-phone time on reconnect. The 10%-step percentage estimate is coarse; use the
-voltage trend alongside it when assessing battery life.
+phone time on reconnect. The percentage estimate now has 1% resolution, using
+the original linear approximation from 0% at 3.2 V to 100% at 4.2 V. It is not
+yet a calibrated lithium-battery curve. The clock, BLE and history all use this
+same estimate; recording every five minutes is independent of its resolution.
+Keep the voltage trend alongside it when assessing battery life and refining
+the curve.
 
 `battery-persist-experimental` mounts the existing InfiniTime LittleFS at
 `0x0B4000..0x400000`. It **never formats** the partition. A mount failure
