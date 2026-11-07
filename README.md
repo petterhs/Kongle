@@ -100,15 +100,15 @@ MCUBoot menu.
 
 The optional `touch-wake-debug` feature keeps touch scanning while the display
 is asleep, so a tap or swipe can wake a development watch with a stuck button.
-It is excluded from OTA firmware at compile time because its power use has not
-been measured. Flash a ST-Link development watch with:
+Its power use has not been measured, so release OTA packages leave it off.
+Flash a ST-Link development watch that can also receive OTA updates with:
 
 ```bash
-KONGLE_FEATURES=mcuboot,touch-wake-debug bash scripts/flash_app.sh
+KONGLE_FEATURES=mcuboot,ota-activation,touch-wake-debug bash scripts/flash_app.sh
 ```
 
-This build does not accept OTA updates. To return to an OTA-capable build, flash
-with `KONGLE_FEATURES=mcuboot,ota-activation`. After flashing, use the MCUBoot
+`touch-wake-debug` is independent of OTA support; a build with only
+`mcuboot,touch-wake-debug` still rejects OTA. After flashing, use the MCUBoot
 RTT command below. Look for `Touch CST816S initialized`, `Touch gesture`, and
 `Touch wake` logs while checking all four swipe directions, taps, sleep/wake,
 and the button hold. Test this on the ST-Link development watch before using it
@@ -126,7 +126,7 @@ ran it, recover the ST-Link development board from `devenv shell` with:
 
 ```bash
 bash scripts/flash_bootloader.sh
-KONGLE_FEATURES=mcuboot,ota-staging bash scripts/flash_app.sh
+bash scripts/flash_app.sh
 ```
 
 Run these one at a time, with no other OpenOCD session using the ST-Link. The
@@ -147,12 +147,12 @@ Kongle can be run under the [Pinetime MCUBoot bootloader](https://github.com/Inf
 - **Build and flash the application image**
 
   ```bash
-  KONGLE_FEATURES=mcuboot,ota-staging bash scripts/flash_app.sh
+  bash scripts/flash_app.sh
   ```
 
   (Run without `sudo` so the build sees your devenv env; the script uses `sudo` only for OpenOCD.)
 
-  This builds the firmware with `--features mcuboot,ota-staging` (separate from the standalone build), wraps it as an **unsigned MCUBoot image** (header `0x200`, slot `0x74000`, version from `Cargo.toml`), verifies that the pinned bootloader is installed, and programs and verifies the application at `0x00008000` via OpenOCD. To build without flashing, use the same `KONGLE_FEATURES` setting with `bash scripts/build-mcuboot-image.sh`. Without `KONGLE_FEATURES`, the script builds only `mcuboot`, which rejects DFU staging requests. The flash script resets the watch and exits. For logs, run `bash scripts/debug.sh` in one terminal, then connect to RTT from another:
+  This builds the firmware with `--features mcuboot,ota-activation` (separate from the standalone build), wraps it as an **unsigned MCUBoot image** (header `0x200`, slot `0x74000`, version from `Cargo.toml`), verifies that the pinned bootloader is installed, and programs and verifies the application at `0x00008000` via OpenOCD. To build without flashing, run `bash scripts/build-mcuboot-image.sh`. Set `KONGLE_FEATURES` explicitly for a different feature set; `mcuboot` alone rejects DFU staging requests. The flash script resets the watch and exits. For logs, run `bash scripts/debug.sh` in one terminal, then connect to RTT from another:
 
   ```bash
   nc localhost 6969 | defmt-print -e target/mcuboot/thumbv7em-none-eabihf/release/kongle
@@ -160,12 +160,11 @@ Kongle can be run under the [Pinetime MCUBoot bootloader](https://github.com/Inf
 
 On reset, the MCUBoot bootloader should show its logo and then start Kongle. Kongle feeds the bootloader's hardware watchdog every second if it finds one already running. A log saying the watchdog is not running does not, by itself, establish whether MCUBoot ran.
 
-This is a debugger-flashed development baseline. With `ota-staging`, Kongle
-receives and verifies an image but rejects final activation. For a dev-board
-trial boot, use `KONGLE_FEATURES=mcuboot,ota-activation` for both flashing the
-baseline and `scripts/build-dfu-package.sh`. Activation requests an MCUBoot
+This is a debugger-flashed development baseline. Activation requests an MCUBoot
 test swap; Kongle does not confirm the new image, so resetting should revert.
-Keep this feature on the ST-Link board until rollback has been tested.
+For a package with matching features, run `bash scripts/build-dfu-package.sh`.
+Use `KONGLE_FEATURES=mcuboot,ota-staging` only when testing reception without
+activation; that build rejects final validation.
 
 The [OTA development sequence](docs/ota.md) describes the opt-in BLE staging
 receiver, watch progress UI, long-hold restart, and trial activation. Manual

@@ -16,9 +16,6 @@ mod ota;
 mod touch;
 mod ui;
 
-#[cfg(all(feature = "touch-wake-debug", feature = "ota-staging"))]
-compile_error!("touch-wake-debug must not be combined with OTA firmware features");
-
 use core::cell::RefCell;
 use defmt_rtt as _;
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice as SharedSpiDevice;
