@@ -25,15 +25,9 @@ continue holding through the bootloader's menu. A short press toggles the
 display. The standalone build does not use the long hold to reset.
 
 The bootloader's watchdog reverts an unconfirmed trial image after a reset.
-Kongle feeds that watchdog but does **not** confirm the image. A
-future explicit confirmation action should be separate from successful boot
-and should be tested only after rollback and recovery work on the dev board.
-
-Kongle uses a stable BLE address derived from the factory address with one
-low-byte bit changed. This keeps Android from reusing InfiniTime's cached GATT
-table after an InfiniTime-to-Kongle trial swap. Scan for Kongle as a new device
-in Furu after the swap, and select its device profile if automatic detection
-did not do so. The prior InfiniTime entry remains useful after rollback.
+Kongle feeds that watchdog but does not automatically confirm the image.
+The explicit Firmware page action is documented in
+[firmware confirmation](firmware-confirmation.md).
 
 ## Receiver and activation work
 
