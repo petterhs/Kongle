@@ -29,32 +29,6 @@ Kongle feeds that watchdog but does not automatically confirm the image.
 The explicit Firmware page action is documented in
 [firmware confirmation](firmware-confirmation.md).
 
-## BLE identity across firmware changes
-
-Kongle uses the factory static-random BLE address, matching InfiniTime: the
-six FICR DEVICEADDR bytes in little-endian order, with the two high bits of the
-last byte set. See InfiniTime's
-[nRF52 address implementation](https://github.com/InfiniTimeOrg/InfiniTime/blob/1.16.1/src/libs/mynewt-nimble/nimble/drivers/nrf52/src/ble_hw.c#L89-L98).
-Changing firmware or reverting a trial must not change that address.
-
-Older Kongle releases XORed the low byte with `0x80` to avoid Android reusing
-InfiniTime's GATT cache. Updating one of those releases therefore changes the
-advertised address once, back to the factory address. For example, a previous
-Kongle address ending in `4C` becomes the original address ending in `CC`.
-An existing Furu entry for the factory address is the one to reconnect to.
-Separate entries saved for the former Kongle address are not migrated by this
-firmware change; their names and history remain separate in Furu.
-
-The two firmwares have different GATT tables. A shared address does not itself
-invalidate Android's cached service handles or update Furu's device profile.
-Hardware checks must cover InfiniTime → Kongle and rollback to InfiniTime
-without forgetting the device: confirm the same MAC, reconnect, profile
-detection, CTS writes, battery reads, notifications and DFU discovery. Repeat
-with Android's Bluetooth toggled and after restarting Furu. If a connection
-succeeds but characteristics fail, capture Android logs to investigate stale
-GATT handles separately from reconnect scheduling. These transition checks
-cannot be established by a firmware build alone.
-
 ## Receiver and activation work
 
 The SPI driver shares the display bus on P0.02/03/04, with flash CS on P0.05.
