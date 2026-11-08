@@ -11,6 +11,9 @@ mod ble;
 mod current_time;
 mod device;
 mod dfu;
+#[cfg(feature = "mcuboot")]
+mod firmware_confirm;
+mod firmware_state;
 mod flash;
 mod notifications;
 mod ota;
@@ -395,6 +398,8 @@ async fn main(spawner: Spawner) {
     config.gpiote_interrupt_priority = Priority::P2;
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
+    #[cfg(feature = "mcuboot")]
+    let mut nvmc = embassy_nrf::nvmc::Nvmc::new(p.NVMC);
     let motor = GpioteOutput::new(
         p.GPIOTE_CH0,
         p.P0_16,
@@ -569,6 +574,8 @@ async fn main(spawner: Spawner) {
     let copy_done =
         unsafe { core::ptr::read_volatile(ota::PRIMARY_COPY_DONE_ADDRESS as *const u8) };
     let image_ok = unsafe { core::ptr::read_volatile(ota::PRIMARY_IMAGE_OK_ADDRESS as *const u8) };
+    #[cfg(feature = "mcuboot")]
+    watch_ui.set_firmware_state(firmware_confirm::state(), false);
     if copy_done == 1 && image_ok == 0xff {
         defmt::warn!("Running unconfirmed trial firmware; next reset reverts");
         OTA_WATCH.sender().send(UpdateStatus::Trial);
@@ -692,9 +699,46 @@ async fn main(spawner: Spawner) {
                         let needs_redraw = watch_ui.handle_touch(gesture);
                         if watch_ui.brightness_level() != previous_brightness {
                             backlight.set(watch_ui.brightness_level());
-                            watch_ui.draw_brightness_selection(&mut display);
+                        }
+                        if watch_ui.take_confirmation_request() {
+                            #[cfg(feature = "mcuboot")]
+                            {
+                                let busy = matches!(
+                                    last_ota,
+                                    UpdateStatus::Erasing
+                                        | UpdateStatus::Receiving { .. }
+                                        | UpdateStatus::Validating
+                                        | UpdateStatus::Staged
+                                        | UpdateStatus::ReadyToRestart
+                                );
+                                let result = if busy {
+                                    Err(())
+                                } else {
+                                    firmware_confirm::confirm(&mut nvmc)
+                                };
+                                match result {
+                                    Ok(state) => {
+                                        defmt::info!(
+                                            "Firmware manually confirmed; reset no longer reverts"
+                                        );
+                                        watch_ui.set_firmware_state(state, false);
+                                        last_ota = UpdateStatus::Idle;
+                                        OTA_WATCH.sender().send(last_ota);
+                                    }
+                                    Err(()) => {
+                                        defmt::warn!(
+                                            "Firmware confirmation refused or readback failed"
+                                        );
+                                        watch_ui
+                                            .set_firmware_state(firmware_confirm::state(), true);
+                                    }
+                                }
+                            }
+                            redraw = true;
                         } else if needs_redraw {
                             redraw = true;
+                        } else {
+                            watch_ui.draw_changed_settings(&mut display);
                         }
                     }
                 }

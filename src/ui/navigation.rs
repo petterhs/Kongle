@@ -7,6 +7,7 @@ pub enum Page {
     Notifications,
     Settings,
     About,
+    Firmware,
 }
 
 /// At most two levels are needed for clock -> launcher -> page. This keeps
@@ -77,12 +78,14 @@ impl Navigation {
             (Page::Clock, TouchEvent::SwipeLeft) => self.open(Page::About),
             (Page::Launcher, TouchEvent::Tap { y: 70..=124, .. }) => self.open(Page::Settings),
             (Page::Launcher, TouchEvent::Tap { y: 125..=180, .. }) => self.open(Page::About),
+            (Page::Launcher, TouchEvent::Tap { y: 181..=239, .. }) => self.open(Page::Firmware),
             (Page::Launcher, TouchEvent::SwipeDown)
             | (Page::Notifications, TouchEvent::SwipeUp)
             | (Page::Settings, TouchEvent::SwipeLeft)
             | (Page::Settings, TouchEvent::SwipeDown)
             | (Page::About, TouchEvent::SwipeDown)
             | (Page::About, TouchEvent::SwipeRight) => self.back(),
+            (Page::Firmware, TouchEvent::SwipeDown) => self.back(),
             _ => false,
         }
     }

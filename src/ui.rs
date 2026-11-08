@@ -24,6 +24,7 @@ use heapless::String;
 
 use crate::{
     device::{battery::BatteryState, display as cfg},
+    firmware_state::{BootState, Confirmation},
     notifications::{Inbox, Notification},
     ota::UpdateStatus,
     touch::TouchEvent,
@@ -185,6 +186,9 @@ pub struct WatchUi {
     notifications: Inbox,
     show_battery_percent: bool,
     vibration_enabled: bool,
+    changed_settings: u8,
+    firmware: Confirmation,
+    confirmation_failed: bool,
     brightness: Brightness,
     last_time: Option<TimeState>,
     last_battery: Option<BatteryState>,
@@ -198,6 +202,9 @@ impl WatchUi {
             notifications: Inbox::new(),
             show_battery_percent: true,
             vibration_enabled: true,
+            changed_settings: 0,
+            firmware: Confirmation::new(),
+            confirmation_failed: false,
             brightness: Brightness::High,
             last_time: None,
             last_battery: None,
@@ -206,6 +213,13 @@ impl WatchUi {
     }
 
     pub fn handle_touch(&mut self, event: TouchEvent) -> bool {
+        let mut cancelled_confirmation = false;
+        if self.navigation.page() == Page::Firmware {
+            if let TouchEvent::Tap { y, .. } = event {
+                return self.firmware.tap(y);
+            }
+            cancelled_confirmation = self.firmware.cancel();
+        }
         if self.navigation.page() == Page::Notifications {
             match event {
                 TouchEvent::SwipeLeft => return self.notifications.older(),
@@ -216,27 +230,33 @@ impl WatchUi {
         if self.navigation.page() == Page::Settings {
             if matches!(event, TouchEvent::Tap { y: 198..=239, .. }) {
                 self.vibration_enabled = !self.vibration_enabled;
-                return true;
+                self.changed_settings |= 4;
+                return false;
             }
             if let TouchEvent::Tap { x, y: 132..=190 } = event {
                 let next = Brightness::from_touch_x(x);
                 let changed = self.brightness != next;
                 self.brightness = next;
-                return changed;
+                if changed {
+                    self.changed_settings |= 2;
+                }
+                return false;
             }
         }
         if self.navigation.page() == Page::Settings
             && matches!(event, TouchEvent::Tap { y: 70..=130, .. })
         {
             self.show_battery_percent = !self.show_battery_percent;
-            return true;
+            self.changed_settings |= 1;
+            return false;
         }
-        self.navigation.handle(event)
+        self.navigation.handle(event) || cancelled_confirmation
     }
 
     pub fn receive_notification(&mut self, notification: Notification, show: bool) {
         self.notifications.push(notification);
         if show {
+            self.firmware.cancel();
             self.navigation.notifications();
         }
     }
@@ -250,7 +270,69 @@ impl WatchUi {
     }
 
     pub fn handle_button(&mut self, awake: bool) -> bool {
+        self.firmware.cancel();
         self.navigation.button(awake)
+    }
+
+    pub fn set_firmware_state(&mut self, state: BootState, failed: bool) {
+        self.firmware.set_state(state);
+        self.confirmation_failed = failed;
+    }
+
+    pub fn take_confirmation_request(&mut self) -> bool {
+        self.firmware.take_request()
+    }
+
+    pub fn draw_changed_settings<D: DrawTarget<Color = Rgb565>>(&mut self, display: &mut D) {
+        let changed = core::mem::take(&mut self.changed_settings);
+        if self.navigation.page() != Page::Settings {
+            return;
+        }
+        if changed & 1 != 0 {
+            self.draw_battery_setting(display);
+        }
+        if changed & 2 != 0 {
+            self.draw_brightness_selection(display);
+        }
+        if changed & 4 != 0 {
+            self.draw_vibration_setting(display);
+        }
+    }
+
+    fn draw_setting<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, text: &str, y: i32) {
+        let _ = Rectangle::new(Point::new(16, y - 20), Size::new(208, 27))
+            .into_styled(PrimitiveStyle::with_fill(cfg::BACKGROUND_COLOR))
+            .draw(display);
+        let style = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(cfg::TEXT_COLOR)
+            .background_color(cfg::BACKGROUND_COLOR)
+            .build();
+        let _ = Text::new(text, Point::new(20, y), style).draw(display);
+    }
+
+    fn draw_battery_setting<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+        self.draw_setting(
+            display,
+            if self.show_battery_percent {
+                "Battery %: ON"
+            } else {
+                "Battery %: OFF"
+            },
+            105,
+        );
+    }
+
+    fn draw_vibration_setting<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+        self.draw_setting(
+            display,
+            if self.vibration_enabled {
+                "Vibration: ON"
+            } else {
+                "Vibration: OFF"
+            },
+            223,
+        );
     }
 
     /// Refresh only the selected brightness labels while the backlight stays on.
@@ -290,6 +372,7 @@ impl WatchUi {
 
     /// OTA progress must remain visible even if another page was open.
     pub fn show_clock(&mut self) -> bool {
+        self.firmware.cancel();
         self.navigation.clock()
     }
 
@@ -508,6 +591,7 @@ impl WatchUi {
             Page::Notifications => "NOTIFICATIONS",
             Page::Settings => "SETTINGS",
             Page::About => "ABOUT",
+            Page::Firmware => "FIRMWARE",
         };
         let style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
@@ -525,6 +609,7 @@ impl WatchUi {
             Page::Launcher => {
                 let _ = Text::new("SETTINGS", Point::new(20, 110), style).draw(display);
                 let _ = Text::new("ABOUT", Point::new(20, 165), style).draw(display);
+                let _ = Text::new("FIRMWARE", Point::new(20, 217), style).draw(display);
             }
             Page::Notifications => {
                 if let Some(notification) = self.notifications.selected() {
@@ -543,33 +628,60 @@ impl WatchUi {
                 }
             }
             Page::Settings => {
-                let battery = if self.show_battery_percent {
-                    "Battery %: ON"
-                } else {
-                    "Battery %: OFF"
-                };
                 let row = Rectangle::new(Point::new(10, 73), Size::new(220, 52))
                     .into_styled(PrimitiveStyle::with_stroke(cfg::ACCENT_COLOR, 1));
                 let _ = row.draw(display);
-                let _ = Text::new(battery, Point::new(20, 105), style).draw(display);
+                self.draw_battery_setting(display);
                 let brightness_row = Rectangle::new(Point::new(10, 132), Size::new(220, 59))
                     .into_styled(PrimitiveStyle::with_stroke(cfg::ACCENT_COLOR, 1));
                 let _ = brightness_row.draw(display);
                 let _ = Text::new("Brightness", Point::new(20, 157), style).draw(display);
                 self.draw_brightness_selection(display);
-                let vibration = if self.vibration_enabled {
-                    "Vibration: ON"
-                } else {
-                    "Vibration: OFF"
-                };
                 let _ = Rectangle::new(Point::new(10, 198), Size::new(220, 36))
                     .into_styled(PrimitiveStyle::with_stroke(cfg::ACCENT_COLOR, 1))
                     .draw(display);
-                let _ = Text::new(vibration, Point::new(20, 223), style).draw(display);
+                self.draw_vibration_setting(display);
             }
             Page::About => {
                 let _ = Text::new("Kongle", Point::new(20, 110), style).draw(display);
                 let _ = Text::new(FIRMWARE_VERSION, Point::new(20, 145), style).draw(display);
+            }
+            Page::Firmware => {
+                if self.firmware.armed {
+                    let _ =
+                        Text::new("Reset will no longer", Point::new(20, 78), style).draw(display);
+                    let _ =
+                        Text::new("restore old firmware", Point::new(20, 101), style).draw(display);
+                    let _ = Rectangle::new(Point::new(10, 118), Size::new(220, 43))
+                        .into_styled(PrimitiveStyle::with_stroke(cfg::ACCENT_COLOR, 1))
+                        .draw(display);
+                    let _ = Text::new("Confirm now", Point::new(20, 146), accent).draw(display);
+                    let _ = Rectangle::new(Point::new(10, 183), Size::new(220, 48))
+                        .into_styled(PrimitiveStyle::with_stroke(cfg::ACCENT_COLOR, 1))
+                        .draw(display);
+                    let _ = Text::new("Keep trial", Point::new(20, 213), style).draw(display);
+                } else {
+                    let _ = Text::new(FIRMWARE_VERSION, Point::new(20, 85), style).draw(display);
+                    let status = match self.firmware.state {
+                        BootState::Standalone => "Standalone firmware",
+                        BootState::NotTrial => "Not a trial image",
+                        BootState::Trial => "Trial: reset reverts",
+                        BootState::Confirmed => "Firmware confirmed",
+                        BootState::Invalid => "Unknown boot state",
+                    };
+                    let _ = Text::new(status, Point::new(20, 118), style).draw(display);
+                    if self.confirmation_failed {
+                        let _ = Text::new("Confirmation failed", Point::new(20, 153), style)
+                            .draw(display);
+                    }
+                    if self.firmware.state == BootState::Trial {
+                        let _ = Rectangle::new(Point::new(10, 183), Size::new(220, 48))
+                            .into_styled(PrimitiveStyle::with_stroke(cfg::ACCENT_COLOR, 1))
+                            .draw(display);
+                        let _ = Text::new("Confirm firmware", Point::new(20, 213), accent)
+                            .draw(display);
+                    }
+                }
             }
             Page::Clock => {}
         }

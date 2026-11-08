@@ -29,6 +29,11 @@ percentage does not imply that validation or activation passed.
 
 ## Input order
 
+Launcher now includes Firmware for explicit trial confirmation; see
+[confirmation behavior and hardware checks](firmware-confirmation.md).
+Settings updates draw only the changed row without cycling the backlight.
+The proposed palette architecture is documented in [themes-plan.md](themes-plan.md).
+
 `src/device/input.rs` configures the PineTime CST816S on TWIM1 and reads its
 interrupt-driven gesture reports. `src/touch.rs` decodes taps and all four
 swipes independently of hardware; `src/ui/navigation.rs` routes them between
