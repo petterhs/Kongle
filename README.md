@@ -58,6 +58,12 @@ with the host's reason, and advertising restart. On a development board,
 capture RTT alongside Android logcat to distinguish link loss from a watch
 reset (`Kongle started` appears again). Closed watches have no RTT access.
 
+Connection feedback uses one 180 ms vibration on connect and two short 50 ms
+vibrations on disconnect, including while the screen sleeps. The Settings
+Vibration switch controls these and notification vibrations. Device Information
+also exposes PINE64, PineTime, the hardware family, and Kongle software version;
+the exact PCB revision is not inferred.
+
 The clock face shows 24-pixel battery-level and Bluetooth icons. Battery
 percentage is shown by default; tap its row in Settings to toggle it for the
 current session. Settings also offers Low, Medium, and High backlight levels;

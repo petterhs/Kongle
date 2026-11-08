@@ -15,6 +15,7 @@ mod dfu;
 mod firmware_confirm;
 mod firmware_state;
 mod flash;
+mod haptics;
 mod notifications;
 mod ota;
 mod touch;
@@ -36,7 +37,6 @@ use embassy_nrf::{
 };
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
 use embassy_sync::mutex::Mutex as AsyncMutex;
-use embassy_sync::signal::Signal;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_graphics::prelude::*;
@@ -104,7 +104,7 @@ static INPUT_CH: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new(
 static NOTIFICATION_CH: Channel<CriticalSectionRawMutex, notifications::Notification, 2> =
     Channel::new();
 static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 1> = Watch::new();
-static VIBRATION_SIGNAL: Signal<CriticalSectionRawMutex, Instant> = Signal::new();
+static VIBRATIONS: Channel<CriticalSectionRawMutex, haptics::Pattern, 4> = Channel::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
 static FLASH_CELL: StaticCell<AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>> =
     StaticCell::new();
@@ -375,15 +375,20 @@ async fn vibration_task(
     timer: HardwareTimer<'static>,
     _shutdown: Ppi<'static, embassy_nrf::peripherals::PPI_CH0, 1, 1>,
 ) {
-    VIBRATION_SIGNAL.wait().await;
     loop {
-        motor.out();
-        timer.clear();
-        timer.cc(0).clear_events();
-        let deadline = Instant::now() + Duration::from_millis(50);
-        timer.start();
-        Timer::after(Duration::from_millis(50)).await;
-        while VIBRATION_SIGNAL.wait().await < deadline {}
+        let pattern = VIBRATIONS.receive().await;
+        for (index, pulse_ms) in pattern.pulses_ms().iter().enumerate() {
+            if index > 0 {
+                Timer::after(Duration::from_millis(100)).await;
+            }
+            timer.clear();
+            timer.cc(0).clear_events();
+            timer.cc(0).write(*pulse_ms * 1_000);
+            // PPI switches the motor off even if the executor is busy.
+            motor.out();
+            timer.start();
+            Timer::after(Duration::from_millis(u64::from(*pulse_ms))).await;
+        }
     }
 }
 
@@ -745,6 +750,16 @@ async fn main(spawner: Spawner) {
                     embassy_futures::select::Either::First(connected),
                 )),
             )) => {
+                if ble_connected != connected && watch_ui.vibration_enabled() {
+                    let pattern = if connected {
+                        haptics::Pattern::Connected
+                    } else {
+                        haptics::Pattern::Disconnected
+                    };
+                    if VIBRATIONS.try_send(pattern).is_err() {
+                        defmt::warn!("Vibration queue full; dropped connection feedback");
+                    }
+                }
                 ble_connected = connected;
                 if !awake {
                     continue;
@@ -764,7 +779,7 @@ async fn main(spawner: Spawner) {
                 );
                 watch_ui.receive_notification(notification, show);
                 if watch_ui.vibration_enabled() {
-                    VIBRATION_SIGNAL.signal(Instant::now());
+                    let _ = VIBRATIONS.try_send(haptics::Pattern::Notification);
                 }
                 defmt::info!("[ans] notification stored; preview={}", show);
                 if show {

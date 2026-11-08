@@ -78,6 +78,14 @@ struct AlertNotificationService {
 struct DeviceInformationService {
     #[characteristic(uuid = "00002a26-0000-1000-8000-00805f9b34fb", read)]
     firmware_revision: heapless09::Vec<u8, 32>,
+    #[characteristic(uuid = "00002a29-0000-1000-8000-00805f9b34fb", read)]
+    manufacturer_name: heapless09::Vec<u8, 32>,
+    #[characteristic(uuid = "00002a24-0000-1000-8000-00805f9b34fb", read)]
+    model_number: heapless09::Vec<u8, 32>,
+    #[characteristic(uuid = "00002a27-0000-1000-8000-00805f9b34fb", read)]
+    hardware_revision: heapless09::Vec<u8, 32>,
+    #[characteristic(uuid = "00002a28-0000-1000-8000-00805f9b34fb", read)]
+    software_revision: heapless09::Vec<u8, 32>,
 }
 
 #[gatt_service(uuid = "00001530-1212-efde-1523-785feabcd123")]
@@ -166,6 +174,24 @@ pub async fn run<C, S>(
             &firmware_revision,
         )
         .unwrap();
+
+    for (characteristic, value) in [
+        (&server.device_information.manufacturer_name, "PINE64"),
+        (&server.device_information.model_number, "PineTime"),
+        // The PCB revision cannot be identified reliably at runtime.
+        (
+            &server.device_information.hardware_revision,
+            "PineTime / nRF52832",
+        ),
+        (
+            &server.device_information.software_revision,
+            concat!("Kongle ", env!("CARGO_PKG_VERSION")),
+        ),
+    ] {
+        let value = heapless09::Vec::<u8, 32>::from_slice(value.as_bytes())
+            .expect("device information fits the GATT characteristic");
+        server.set(characteristic, &value).unwrap();
+    }
 
     let mut time_rx = time_rx;
     connected_tx.send(false);
