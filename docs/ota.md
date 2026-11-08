@@ -25,15 +25,35 @@ continue holding through the bootloader's menu. A short press toggles the
 display. The standalone build does not use the long hold to reset.
 
 The bootloader's watchdog reverts an unconfirmed trial image after a reset.
-Kongle feeds that watchdog but does **not** confirm the image. A
-future explicit confirmation action should be separate from successful boot
-and should be tested only after rollback and recovery work on the dev board.
+Kongle feeds that watchdog but does not automatically confirm the image.
+The explicit Firmware page action is documented in
+[firmware confirmation](firmware-confirmation.md).
 
-Kongle uses a stable BLE address derived from the factory address with one
-low-byte bit changed. This keeps Android from reusing InfiniTime's cached GATT
-table after an InfiniTime-to-Kongle trial swap. Scan for Kongle as a new device
-in Furu after the swap, and select its device profile if automatic detection
-did not do so. The prior InfiniTime entry remains useful after rollback.
+## BLE identity across firmware changes
+
+Kongle uses the factory static-random BLE address, matching InfiniTime: the
+six FICR DEVICEADDR bytes in little-endian order, with the two high bits of the
+last byte set. See InfiniTime's
+[nRF52 address implementation](https://github.com/InfiniTimeOrg/InfiniTime/blob/1.16.1/src/libs/mynewt-nimble/nimble/drivers/nrf52/src/ble_hw.c#L89-L98).
+Changing firmware or reverting a trial must not change that address.
+
+Older Kongle releases XORed the low byte with `0x80` to avoid Android reusing
+InfiniTime's GATT cache. Updating one of those releases therefore changes the
+advertised address once, back to the factory address. For example, a previous
+Kongle address ending in `4C` becomes the original address ending in `CC`.
+An existing Furu entry for the factory address is the one to reconnect to.
+Separate entries saved for the former Kongle address are not migrated by this
+firmware change; their names and history remain separate in Furu.
+
+The two firmwares have different GATT tables. A shared address does not itself
+invalidate Android's cached service handles or update Furu's device profile.
+Hardware checks must cover InfiniTime → Kongle and rollback to InfiniTime
+without forgetting the device: confirm the same MAC, reconnect, profile
+detection, CTS writes, battery reads, notifications and DFU discovery. Repeat
+with Android's Bluetooth toggled and after restarting Furu. If a connection
+succeeds but characteristics fail, capture Android logs to investigate stale
+GATT handles separately from reconnect scheduling. These transition checks
+cannot be established by a firmware build alone.
 
 ## Receiver and activation work
 
