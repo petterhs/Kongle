@@ -10,6 +10,8 @@ mod battery_record;
 mod current_time;
 #[path = "../../../src/device/display.rs"]
 mod display;
+#[path = "../../../src/firmware_state.rs"]
+mod firmware_state;
 #[path = "../../../src/ui/navigation.rs"]
 mod navigation;
 #[path = "../../../src/notifications.rs"]
@@ -22,6 +24,85 @@ mod touch;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confirmation_requires_an_intact_trial_and_only_programs_image_ok() {
+        use firmware_state::*;
+        let magic = ota::TRAILER_MAGIC;
+        assert_eq!(classify(FLAG_SET, ERASED, &magic), BootState::Trial);
+        assert_eq!(
+            confirmation_word(FLAG_SET, ERASED, &magic),
+            Some([1, 0xff, 0xff, 0xff])
+        );
+        assert_eq!(classify(FLAG_SET, FLAG_SET, &magic), BootState::Confirmed);
+        assert_eq!(confirmation_word(FLAG_SET, FLAG_SET, &magic), None);
+        assert_eq!(classify(ERASED, ERASED, &[0xff; 16]), BootState::NotTrial);
+        for (copy, ok) in [
+            (ERASED, ERASED),
+            (0xffff_ff00, ERASED),
+            (FLAG_SET, 0xffff_ff7f),
+            (0xffff_0001, ERASED),
+            (FLAG_SET, 0x00ff_ffff),
+        ] {
+            assert_eq!(confirmation_word(copy, ok, &magic), None);
+        }
+        let mut bad_magic = magic;
+        bad_magic[3] ^= 1;
+        assert_eq!(confirmation_word(FLAG_SET, ERASED, &bad_magic), None);
+        assert_eq!(ota::PRIMARY_IMAGE_OK_ADDRESS % 4, 0);
+        assert_eq!(
+            ota::PRIMARY_IMAGE_OK_ADDRESS + 8,
+            ota::PRIMARY_MAGIC_ADDRESS
+        );
+    }
+
+    #[test]
+    fn confirmation_needs_two_different_taps_and_cancel_cannot_write() {
+        use firmware_state::*;
+        let mut ui = Confirmation::new();
+        for state in [
+            BootState::Standalone,
+            BootState::NotTrial,
+            BootState::Confirmed,
+            BootState::Invalid,
+        ] {
+            ui.set_state(state);
+            ui.tap(200);
+            ui.tap(140);
+            assert!(!ui.take_request());
+        }
+        ui.set_state(BootState::Trial);
+        assert!(ui.tap(200));
+        assert!(ui.armed);
+        assert!(!ui.take_request());
+        ui.tap(200); // A duplicate first tap is Cancel, never confirmation.
+        ui.tap(140);
+        assert!(!ui.take_request());
+        ui.tap(200);
+        assert!(ui.cancel()); // Navigation/button/notification cancels and redraws the dialog.
+        assert!(!ui.cancel());
+        ui.tap(140);
+        assert!(!ui.take_request());
+        ui.tap(200);
+        ui.tap(140);
+        assert!(ui.take_request());
+        assert!(!ui.take_request());
+    }
+
+    #[test]
+    fn firmware_page_has_a_bounded_return_path_and_button_returns_home() {
+        use navigation::{Navigation, Page};
+        use touch::TouchEvent::*;
+        let mut nav = Navigation::new();
+        nav.handle(SwipeUp);
+        nav.handle(Tap { x: 100, y: 210 });
+        assert_eq!(nav.page(), Page::Firmware);
+        assert!(nav.handle(SwipeDown));
+        assert_eq!(nav.page(), Page::Launcher);
+        nav.handle(Tap { x: 100, y: 210 });
+        assert!(nav.button(true));
+        assert_eq!(nav.page(), Page::Clock);
+    }
 
     #[test]
     fn battery_estimate_has_one_percent_steps_and_saturates() {

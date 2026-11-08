@@ -22,6 +22,7 @@ pub const SECONDARY_SECTORS: u32 = SECONDARY_SLOT_SIZE / 4096;
 /// (8-byte trailer alignment; magic begins at 0x7bff0).
 pub const PRIMARY_COPY_DONE_ADDRESS: usize = 0x0007_bfe0;
 pub const PRIMARY_IMAGE_OK_ADDRESS: usize = 0x0007_bfe8;
+pub const PRIMARY_MAGIC_ADDRESS: usize = 0x0007_bff0;
 
 /// A freshly debugger-flashed primary has erased trailer words; a swapped
 /// trial has copy_done=1 but image_ok erased. Do not erase its rollback copy.
