@@ -33,6 +33,12 @@ notifications run concurrently, preserving the DFU receive-loop fix.
 
 ## Furu and physical checks
 
+The maintainer verified playback controls with Spotify and Absorb on hardware.
+After Furu's playback-notification filter was added, the maintainer confirmed
+that playback no longer creates watch alerts or interrupts the Media page.
+Media control is accepted for this iteration. Volume controls are deferred
+until needed; they are not part of the 0.4.0 media-control release gate.
+
 Use Furu's `feature/media-control` build and enable Android notification access
 for the installed Furu variant. This access is needed for Android media sessions;
 global notification forwarding need not be enabled. Built-in profiles include
