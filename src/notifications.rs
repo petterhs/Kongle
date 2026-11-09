@@ -23,7 +23,7 @@ fn display_text<const N: usize>(bytes: &[u8]) -> String<N> {
         .unwrap_or_else(|err| core::str::from_utf8(&bytes[..err.valid_up_to()]).unwrap_or(""));
     let mut result = String::new();
     for ch in valid.chars() {
-        let display = if ch.is_ascii_graphic() || ch == ' ' {
+        let display = if ch.is_ascii_graphic() || ch == ' ' || ('\u{a0}'..='\u{ff}').contains(&ch) {
             ch
         } else if ch.is_whitespace() {
             ' '

@@ -6,6 +6,10 @@ Use the [official palette](https://github.com/catppuccin/palette) as the source,
 pin the version and retain its required attribution when adding palette data.
 This document proposes the design; it does not change the current watch colors.
 
+See the [Mocha/TUI UX exploration](design/mocha-tui.md) and its offline browser
+sketch for the proposed panel style and navigation experiments. Neither changes
+the firmware renderer yet.
+
 Define a `Theme` with RGB565 roles: background, surface, text, muted text, accent,
 warning, error and success. Screens/icons use these roles instead of their own
 color constants. Eight two-byte colors take sixteen bytes per palette; palette

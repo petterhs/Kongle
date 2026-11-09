@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "kongle"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "apache-nimble",
  "bt-hci",
@@ -1128,8 +1128,10 @@ version = "0.0.0"
 dependencies = [
  "chrono",
  "display-interface 0.5.0",
+ "eg-seven-segment",
  "embedded-graphics",
  "embedded-hal 1.0.0",
+ "embedded-iconoir",
  "heapless 0.8.0",
  "mipidsi",
 ]
