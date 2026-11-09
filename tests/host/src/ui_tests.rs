@@ -217,6 +217,51 @@ fn bluetooth_is_blue_when_connected_and_clears_completely_on_disconnect() {
 }
 
 #[test]
+fn media_protocol_validates_lengths_and_does_not_replay_across_connections() {
+    use crate::media::{Command, State};
+    let mut state = State::new();
+    state.session = 7;
+    assert!(!state.available());
+    state.apply(4, "Blåbær".as_bytes()).unwrap();
+    state.apply(2, &[1]).unwrap();
+    state.apply(6, &1234u32.to_be_bytes()).unwrap();
+    assert_eq!(state.position, 1234);
+    let before = state.clone();
+    for (field, data) in [
+        (2, &[2][..]),
+        (6, &[1, 2][..]),
+        (4, &[0xff][..]),
+        (15, &[0][..]),
+    ] {
+        assert!(state.apply(field, data).is_err());
+        assert_eq!(state, before);
+    }
+    let mut ui = WatchUi::new();
+    ui.set_media(state.clone());
+    ui.open_media();
+    assert_eq!(ui.take_media_request().unwrap().command, Command::Open);
+    ui.handle_touch(TouchEvent::Tap { x: 30, y: 170 });
+    let request = ui.take_media_request().unwrap();
+    assert_eq!(request.session, 7);
+    assert_eq!(request.command, Command::Previous);
+    ui.handle_touch(TouchEvent::Tap { x: 120, y: 170 });
+    assert_eq!(ui.take_media_request().unwrap().command, Command::Pause);
+    let mut frame = Frame::new();
+    render(&mut ui, &mut frame);
+    frame.preview("media-playing");
+    let header = frame.pixels[..24 * 240].to_vec();
+    state.apply(2, &[0]).unwrap();
+    ui.set_media(state);
+    ui.draw_media(&mut frame);
+    assert_eq!(header, frame.pixels[..24 * 240]);
+    ui.handle_touch(TouchEvent::Tap { x: 120, y: 170 });
+    assert_eq!(ui.take_media_request().unwrap().command, Command::Play);
+    ui.set_media(State::new());
+    ui.handle_touch(TouchEvent::Tap { x: 190, y: 170 });
+    assert!(ui.take_media_request().is_none());
+}
+
+#[test]
 fn renderer_fits_pages_and_preserves_screen_during_settings_and_clock_ticks() {
     use TouchEvent::*;
     let mut ui = WatchUi::new();

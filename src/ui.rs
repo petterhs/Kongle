@@ -27,7 +27,7 @@ use embedded_iconoir::{
         activities::Walking,
         communication::Bell,
         connectivity::Bluetooth,
-        music::{Play, SkipNext, SkipPrev},
+        music::{Pause, Play, SkipNext, SkipPrev},
         system,
     },
     prelude::IconoirIcon,
@@ -197,6 +197,8 @@ pub struct WatchUi {
     last_battery: Option<BatteryState>,
     skip_clear: bool,
     ble_address: Option<[u8; 6]>,
+    media: crate::media::State,
+    media_request: Option<crate::media::Request>,
 }
 
 impl WatchUi {
@@ -216,6 +218,8 @@ impl WatchUi {
             last_battery: None,
             skip_clear: false,
             ble_address: None,
+            media: crate::media::State::new(),
+            media_request: None,
         }
     }
 
@@ -237,9 +241,48 @@ impl WatchUi {
         }
         self.firmware.cancel();
         self.navigation.media();
+        self.request_media(crate::media::Command::Open);
+    }
+
+    fn request_media(&mut self, command: crate::media::Command) {
+        if self.media.session != 0 {
+            self.media_request = Some(crate::media::Request {
+                session: self.media.session,
+                command,
+            });
+        }
+    }
+
+    pub fn take_media_request(&mut self) -> Option<crate::media::Request> {
+        self.media_request.take()
+    }
+
+    pub fn set_media(&mut self, state: crate::media::State) -> bool {
+        let changed = self.media != state;
+        self.media = state;
+        changed
     }
 
     pub fn handle_touch(&mut self, event: TouchEvent) -> bool {
+        if self.navigation.page() == Page::Media && self.media.available() {
+            if let TouchEvent::Tap { x, y: 140..=203 } = event {
+                let command = match x {
+                    16..=79 => Some(crate::media::Command::Previous),
+                    88..=151 => Some(if self.media.playing {
+                        crate::media::Command::Pause
+                    } else {
+                        crate::media::Command::Play
+                    }),
+                    160..=223 => Some(crate::media::Command::Next),
+                    _ => None,
+                };
+                if let Some(command) = command {
+                    self.request_media(command);
+                }
+                return false;
+            }
+        }
+
         let mut cancelled_confirmation = false;
         if self.navigation.page() == Page::Firmware {
             if let TouchEvent::Tap { y, .. } = event {
@@ -289,6 +332,9 @@ impl WatchUi {
             return true;
         }
         let changed = self.navigation.handle(event);
+        if changed && self.navigation.page() == Page::Media {
+            self.request_media(crate::media::Command::Open);
+        }
         if changed && self.navigation.page() == Page::Notifications {
             self.has_unread = false;
         }
@@ -649,6 +695,70 @@ impl WatchUi {
         self.skip_clear = false;
     }
 
+    pub fn draw_media<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+        if self.navigation.page() != Page::Media {
+            return;
+        }
+        let style = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(theme::TEXT)
+            .build();
+        let muted = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(theme::MUTED)
+            .build();
+        let _ = Rectangle::new(Point::new(16, 30), Size::new(208, 94))
+            .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
+            .draw(display);
+        if self.media.available() {
+            draw_text_lines(
+                display,
+                if self.media.title.is_empty() {
+                    self.tr("Media", "Avspilling")
+                } else {
+                    &self.media.title
+                },
+                50,
+                2,
+                style,
+            );
+            draw_text_lines(display, &self.media.artist, 110, 1, muted);
+        } else {
+            let _ = Text::new(
+                self.tr("No player", "Ingen avspiller"),
+                Point::new(20, 58),
+                style,
+            )
+            .draw(display);
+        }
+        let color = if self.media.available() {
+            theme::ACCENT
+        } else {
+            theme::DISABLED
+        };
+        for x in [16, 88, 160] {
+            let _ = RoundedRectangle::with_equal_corners(
+                Rectangle::new(Point::new(x, 140), Size::new(64, 64)),
+                Size::new(6, 6),
+            )
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .fill_color(theme::BACKGROUND)
+                    .stroke_color(color)
+                    .stroke_width(2)
+                    .build(),
+            )
+            .draw(display);
+        }
+        draw_icon::<D, SkipPrev>(display, Point::new(36, 160), color);
+        if self.media.playing {
+            draw_icon::<D, Pause>(display, Point::new(108, 160), color);
+        } else {
+            draw_icon::<D, Play>(display, Point::new(108, 160), color);
+        }
+        draw_icon::<D, SkipNext>(display, Point::new(180, 160), color);
+    }
+
     fn draw_page<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
         let title = match self.navigation.page() {
             Page::Clock => return,
@@ -769,25 +879,7 @@ impl WatchUi {
                 )
                 .draw(display);
             }
-            Page::Media => {
-                let _ = Text::new(
-                    self.tr("No player", "Ingen avspiller"),
-                    Point::new(20, 58),
-                    style,
-                )
-                .draw(display);
-                for x in [16, 88, 160] {
-                    let _ = RoundedRectangle::with_equal_corners(
-                        Rectangle::new(Point::new(x, 140), Size::new(64, 64)),
-                        Size::new(6, 6),
-                    )
-                    .into_styled(PrimitiveStyle::with_stroke(theme::DISABLED, 2))
-                    .draw(display);
-                }
-                draw_icon::<D, SkipPrev>(display, Point::new(36, 160), theme::DISABLED);
-                draw_icon::<D, Play>(display, Point::new(108, 160), theme::DISABLED);
-                draw_icon::<D, SkipNext>(display, Point::new(180, 160), theme::DISABLED);
-            }
+            Page::Media => self.draw_media(display),
             Page::About => {
                 let _ = Text::new("Kongle", Point::new(20, 58), style).draw(display);
                 let _ = Text::new(FIRMWARE_VERSION, Point::new(20, 100), style).draw(display);

@@ -42,11 +42,10 @@ until the layout/input behavior has been tested on the ST-Link development watch
 
 ## Intentionally not connected yet
 
-The Home and Media pages currently show unavailable/unconfigured states. They
-do not execute actions. No new BLE service has been added in this iteration.
-InfiniTime-compatible media commands and Furu's Android media bridge are the
-next implementation step after basic screen/button validation. Home Assistant,
-real remote sensor values, step sampling and shared LittleFS writes are later.
+The Home page is still unconfigured. Media is now wired to the InfiniTime BLE
+music protocol and Furu's native Android bridge; see [media control](../media-control.md)
+for setup and hardware checks. Home Assistant, real remote sensor values, step
+sampling and shared LittleFS writes are later.
 Home controls remain reachable in this local prototype. When the Furu integration
 is implemented, hide that page unless enabled for this watch; disabled clock
 slots must not navigate to an unconfigured integration page.

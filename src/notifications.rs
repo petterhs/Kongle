@@ -18,7 +18,7 @@ pub enum ParseError {
     MissingSeparator,
 }
 
-fn display_text<const N: usize>(bytes: &[u8]) -> String<N> {
+pub(crate) fn display_text<const N: usize>(bytes: &[u8]) -> String<N> {
     let valid = core::str::from_utf8(bytes)
         .unwrap_or_else(|err| core::str::from_utf8(&bytes[..err.valid_up_to()]).unwrap_or(""));
     let mut result = String::new();

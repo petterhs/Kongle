@@ -18,6 +18,7 @@ mod firmware_confirm;
 mod firmware_state;
 mod flash;
 mod haptics;
+mod media;
 mod notifications;
 mod ota;
 #[path = "ui/theme.rs"]
@@ -109,6 +110,8 @@ static BLE_CONNECTED_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new
 static INPUT_CH: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new();
 static NOTIFICATION_CH: Channel<CriticalSectionRawMutex, notifications::Notification, 2> =
     Channel::new();
+static MEDIA_WATCH: Watch<CriticalSectionRawMutex, media::State, 2> = Watch::new();
+static MEDIA_COMMANDS: Channel<CriticalSectionRawMutex, media::Request, 4> = Channel::new();
 static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 1> = Watch::new();
 static VIBRATIONS: Channel<CriticalSectionRawMutex, haptics::Pattern, 4> = Channel::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
@@ -630,6 +633,7 @@ async fn main(spawner: Spawner) {
     let mut ble_rx = BLE_CONNECTED_WATCH.receiver().unwrap();
     let input_rx = INPUT_CH.receiver();
     let notification_rx = NOTIFICATION_CH.receiver();
+    let mut media_rx = MEDIA_WATCH.receiver().unwrap();
 
     let mut last_ota = UpdateStatus::Idle;
     let mut ble_connected = false;
@@ -648,7 +652,10 @@ async fn main(spawner: Spawner) {
                         input_rx.receive(),
                         embassy_futures::select::select(
                             ble_rx.changed(),
-                            notification_rx.receive(),
+                            embassy_futures::select::select(
+                                notification_rx.receive(),
+                                media_rx.changed(),
+                            ),
                         ),
                     ),
                 ),
@@ -820,7 +827,9 @@ async fn main(spawner: Spawner) {
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
                 embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
-                    embassy_futures::select::Either::Second(notification),
+                    embassy_futures::select::Either::Second(
+                        embassy_futures::select::Either::First(notification),
+                    ),
                 )),
             )) => {
                 let show = !matches!(
@@ -843,6 +852,22 @@ async fn main(spawner: Spawner) {
                     redraw = true;
                     sleep_at = Instant::now() + Duration::from_secs(30);
                 }
+            }
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                    embassy_futures::select::Either::Second(
+                        embassy_futures::select::Either::Second(state),
+                    ),
+                )),
+            )) => {
+                if watch_ui.set_media(state) && awake {
+                    watch_ui.draw_media(&mut display);
+                }
+            }
+        }
+        if let Some(request) = watch_ui.take_media_request() {
+            if MEDIA_COMMANDS.try_send(request).is_err() {
+                defmt::warn!("[media] command queue full");
             }
         }
         if awake

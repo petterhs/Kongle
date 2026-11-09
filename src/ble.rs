@@ -44,6 +44,36 @@ struct Server {
     alert_notification: AlertNotificationService,
     battery_service: BatteryService,
     battery_history: BatteryHistoryService,
+    music: MusicService,
+}
+
+/// InfiniTime music protocol. Numeric metadata is big-endian, unlike CTS.
+#[gatt_service(uuid = "00000000-78fc-48fe-8e23-433b3a1942d0")]
+struct MusicService {
+    #[characteristic(uuid = "00000001-78fc-48fe-8e23-433b3a1942d0", notify)]
+    events: u8,
+    #[characteristic(uuid = "00000002-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    status: u8,
+    #[characteristic(uuid = "00000003-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    artist: heapless09::Vec<u8, 40>,
+    #[characteristic(uuid = "00000004-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    title: heapless09::Vec<u8, 40>,
+    #[characteristic(uuid = "00000005-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    album: heapless09::Vec<u8, 40>,
+    #[characteristic(uuid = "00000006-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    position: [u8; 4],
+    #[characteristic(uuid = "00000007-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    duration: [u8; 4],
+    #[characteristic(uuid = "00000008-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    track: [u8; 4],
+    #[characteristic(uuid = "00000009-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    tracks: [u8; 4],
+    #[characteristic(uuid = "0000000a-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    speed: [u8; 4],
+    #[characteristic(uuid = "0000000b-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    repeat: u8,
+    #[characteristic(uuid = "0000000c-78fc-48fe-8e23-433b3a1942d0", read, write)]
+    shuffle: u8,
 }
 
 #[gatt_service(uuid = "0000180f-0000-1000-8000-00805f9b34fb")]
@@ -266,6 +296,33 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
     history: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<History>>,
 ) {
     let mut dfu = dfu::Receiver::new();
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static NEXT_MEDIA_SESSION: AtomicU32 = AtomicU32::new(1);
+    let media_session = NEXT_MEDIA_SESSION.fetch_add(1, Ordering::Relaxed);
+    let mut media = crate::media::State::new();
+    media.session = media_session;
+    crate::MEDIA_WATCH.sender().send(media.clone());
+    while crate::MEDIA_COMMANDS.try_receive().is_ok() {}
+    let _ = server.set(&server.music.status, &0);
+    for characteristic in [
+        &server.music.title,
+        &server.music.artist,
+        &server.music.album,
+    ] {
+        let _ = server.set(characteristic, &heapless09::Vec::<u8, 40>::new());
+    }
+    for characteristic in [
+        &server.music.position,
+        &server.music.duration,
+        &server.music.track,
+        &server.music.tracks,
+    ] {
+        let _ = server.set(characteristic, &[0u8; 4]);
+    }
+    let _ = server.set(&server.music.speed, &100u32.to_be_bytes());
+    let _ = server.set(&server.music.repeat, &0);
+    let _ = server.set(&server.music.shuffle, &0);
+
     // Time updates are not consumed while advertising. Publish the latest one
     // before the newly connected client can read the shared GATT attribute.
     if let Some(t) = time_rx.try_changed() {
@@ -289,6 +346,23 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                     GattConnectionEvent::Gatt { event } => {
                         let mut dfu_reply = None;
                         let error = match &event {
+                            GattEvent::Write(write)
+                                if music_field(server, write.handle()).is_some() =>
+                            {
+                                if media
+                                    .apply(
+                                        music_field(server, write.handle()).unwrap(),
+                                        write.data(),
+                                    )
+                                    .is_err()
+                                {
+                                    Some(AttErrorCode::VALUE_NOT_ALLOWED)
+                                } else {
+                                    crate::MEDIA_WATCH.sender().send(media.clone());
+                                    None
+                                }
+                            }
+
                             GattEvent::Write(write)
                                 if write.handle() == server.battery_history.epoch.handle =>
                             {
@@ -446,13 +520,69 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
             }
         },
     );
-    let _ = embassy_futures::select::select(gatt_and_time, async {
+    let gatt_time_battery = embassy_futures::select::select(gatt_and_time, async {
         loop {
             publish_battery(server, battery_rx.changed().await);
         }
+    });
+    let _ = embassy_futures::select::select(gatt_time_battery, async {
+        loop {
+            let request = crate::MEDIA_COMMANDS.receive().await;
+            if request.session != media_session {
+                continue;
+            }
+            if server
+                .music
+                .events
+                .notify(conn, &(request.command as u8))
+                .await
+                .is_err()
+            {
+                defmt::warn!("[media] event not delivered");
+            }
+        }
     })
     .await;
+    crate::MEDIA_WATCH.sender().send(crate::media::State::new());
+    while crate::MEDIA_COMMANDS.try_receive().is_ok() {}
     dfu.on_disconnect();
+}
+
+fn music_field(server: &Server<'_>, handle: u16) -> Option<u8> {
+    if handle == server.music.status.handle {
+        return Some(2);
+    }
+    if handle == server.music.artist.handle {
+        return Some(3);
+    }
+    if handle == server.music.title.handle {
+        return Some(4);
+    }
+    if handle == server.music.album.handle {
+        return Some(5);
+    }
+    if handle == server.music.position.handle {
+        return Some(6);
+    }
+    if handle == server.music.duration.handle {
+        return Some(7);
+    }
+    if handle == server.music.track.handle {
+        return Some(8);
+    }
+    if handle == server.music.tracks.handle {
+        return Some(9);
+    }
+    if handle == server.music.speed.handle {
+        return Some(10);
+    }
+    if handle == server.music.repeat.handle {
+        return Some(11);
+    }
+    if handle == server.music.shuffle.handle {
+        return Some(12);
+    }
+    None
 }
 
 fn publish_battery(server: &Server<'static>, battery: BatteryState) {

@@ -6,6 +6,8 @@ mod ble_identity;
 mod button_gestures;
 #[path = "../../../src/ui/language.rs"]
 mod language;
+#[path = "../../../src/media.rs"]
+mod media;
 #[path = "../../../src/ui/theme.rs"]
 mod theme;
 #[path = "../../../src/ui.rs"]
