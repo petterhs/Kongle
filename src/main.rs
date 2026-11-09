@@ -118,6 +118,7 @@ static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> 
 static FLASH_CELL: StaticCell<AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>> =
     StaticCell::new();
 static TOUCH_TX_BUFFER: StaticCell<[u8; 8]> = StaticCell::new();
+static SENSOR_BUS: StaticCell<device::i2c::Bus> = StaticCell::new();
 type FlashSpi = SharedSpiDevice<'static, NoopRawMutex, Spim<'static>, Output<'static>>;
 /// The future BLE receiver publishes progress here; the display owns the view.
 pub(crate) static OTA_WATCH: Watch<CriticalSectionRawMutex, UpdateStatus, 2> = Watch::new();
@@ -366,6 +367,27 @@ async fn wdt_task_1(mut h0: embassy_nrf::wdt::WatchdogHandle) {
     }
 }
 
+/// Read-only hardware identification. This does not enable step counting or
+/// upload an unverified feature configuration to an unknown sensor.
+#[embassy_executor::task]
+async fn sensor_probe_task(mut bus: device::i2c::Device<'static>) {
+    use embedded_hal_async::i2c::I2c;
+    let mut chip_id = [0u8];
+    match embassy_time::with_timeout(
+        Duration::from_millis(500),
+        bus.write_read(0x18, &[0x00], &mut chip_id),
+    )
+    .await
+    {
+        Ok(Ok(())) => defmt::info!(
+            "[motion] read-only probe: chip ID {:02x}; step engine not initialized",
+            chip_id[0]
+        ),
+        Ok(Err(error)) => defmt::warn!("[motion] chip ID read failed: {:?}", error),
+        Err(_) => defmt::warn!("[motion] chip ID read timed out"),
+    }
+}
+
 #[embassy_executor::task]
 async fn run_controller(controller_task: apache_nimble::controller::NimbleControllerTask) {
     controller_task.run().await
@@ -489,18 +511,22 @@ async fn main(spawner: Spawner) {
     let mut touch_config = TwimConfig::default();
     touch_config.sda_pullup = true;
     touch_config.scl_pullup = true;
+    let sensor_bus = SENSOR_BUS.init(AsyncMutex::new(Twim::new(
+        p.TWISPI1,
+        Irqs,
+        p.P0_06,
+        p.P0_07,
+        touch_config,
+        TOUCH_TX_BUFFER.init([0; 8]),
+    )));
     let touch = device::input::TouchScreen::new(
-        Twim::new(
-            p.TWISPI1,
-            Irqs,
-            p.P0_06,
-            p.P0_07,
-            touch_config,
-            TOUCH_TX_BUFFER.init([0; 8]),
-        ),
+        device::i2c::Device::new(sensor_bus),
         Input::new(p.P0_28, Pull::Up),
         Output::new(p.P0_10, Level::High, OutputDrive::Standard),
     );
+    spawner
+        .spawn(sensor_probe_task(device::i2c::Device::new(sensor_bus)))
+        .unwrap();
 
     // PineTime backlight pins (active-low): P0.14, P0.22, P0.23
     let backlight_low = Output::new(p.P0_14, Level::High, OutputDrive::Standard);

@@ -1,7 +1,7 @@
 # Step measurement for Kongle 0.4.0
 
-Status: investigation and implementation plan; no motion driver is enabled in
-the current UI build. Goal: reliable wrist-worn counting with low idle cost,
+Status: shared I2C transport and a read-only startup probe are implemented on
+`feature/sensor-foundation`; the step engine is not enabled. Goal: reliable wrist-worn counting with low idle cost,
 documented limitations and reproducible tests. Improvement over another firmware
 must be demonstrated on measured cases, not inferred from a rewritten driver.
 
@@ -33,8 +33,9 @@ reproducible source provenance rather than depending on an unverified mirror.
   and each battery-powered test watch. Unknown chips fail closed for step data;
   do not return a convincing zero or upload a guessed feature blob.
 - Confirm schematic address/IRQ wiring and share I2C with touch and future HRM.
-  Touch currently owns TWIM1. Introduce serialized transactions and keep IRQ
-  waits outside the bus lock. Audit reset/bus recovery behavior, timeouts and
+  Touch and motion now share TWIM1 through Embassy's asynchronous I2cDevice;
+  transactions are serialized and touch IRQ waits stay outside the bus lock.
+  Audit reset/bus recovery behavior, timeouts and
   the effect on the touch controller before adding sensor startup.
 - Select a matching Bosch feature configuration with recorded source revision
   and checksum. Check all bus errors and feature-engine initialization status.
@@ -45,6 +46,16 @@ reproducible source provenance rather than depending on an unverified mirror.
 
 Deliverable: a minimal Rust driver that initializes the identified part and
 reports a raw cumulative hardware counter, with independent transport tests.
+
+### First hardware check
+
+The foundation build reads only register `0x00` at I2C address `0x18`, once at
+startup with a 500 ms timeout. It does not reset the sensor, upload configuration
+or turn on step counting. Capture the `[motion] read-only probe: chip ID …`
+message from RTT, then check touch/swipes, display sleep/wake and BLE together.
+A missing sensor must log an error and leave the rest of the watch usable.
+Record the returned ID before selecting a variant configuration. A successful
+read alone does not establish which configuration blob is safe to load.
 
 ## 2. Establish a baseline before tuning
 
