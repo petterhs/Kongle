@@ -51,6 +51,46 @@ fn flat_dark_saturated_and_seeded_random_signals_do_not_become_pulse() {
 }
 
 #[test]
+fn pulse_shaped_waveforms_with_slow_adc_updates_and_drift_are_not_just_sine_tests() {
+    for bpm in [60, 72, 90] {
+        for conversion_ms in [40, 75, 100] {
+            let mut estimator = Estimator::new();
+            let mut readings = Vec::new();
+            for index in 0..1000 {
+                let now = index * 40;
+                let conversion = now / conversion_ms * conversion_ms;
+                let phase = (conversion as f64 * f64::from(bpm) / 60000.0).fract();
+                let primary = (-((phase - 0.15) / 0.08).powi(2)).exp();
+                let reflected = 0.25 * (-((phase - 0.45) / 0.08).powi(2)).exp();
+                let drift = 100.0 * (conversion as f64 / 20000.0 * std::f64::consts::TAU).sin();
+                let noise = (index % 7) as f64 - 3.0;
+                let raw = (8000.0 + 400.0 * (primary + reflected) + drift + noise) as u32;
+                if let Some(found) = estimator.sample(raw, 10, now) {
+                    readings.push(found);
+                }
+            }
+            assert!(
+                readings.len() >= 3,
+                "target {} BPM, ADC period {} ms",
+                bpm,
+                conversion_ms
+            );
+            assert!(
+                readings
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .all(|found| (i32::from(*found) - bpm).abs() <= bpm / 10),
+                "target {} BPM, ADC period {} ms; recent {:?}",
+                bpm,
+                conversion_ms,
+                readings.iter().rev().take(5).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
 fn stale_previous_session_and_fault_readings_are_not_valid_measurements() {
     let mut state = State {
         phase: Phase::Idle,

@@ -52,6 +52,16 @@ eight-second buffer. Flat/dark/clipped signals, large timing gaps and unstable
 intervals are rejected. Rates are restricted to 30–220 BPM. Periodic motion can
 still mimic a pulse: these are experimental estimates, not medical measurements.
 Synthetic tests are regression checks, not validation on people or movement.
+Tests also exercise pulse-shaped waveforms with a reflected secondary peak,
+slow baseline drift, small noise and ADC updates held for 40/75/100 ms. These
+cases pass, but do not establish the actual device's signal range or quality.
+
+The first closed-watch test started acquisition with a blinking green LED but
+ended in No clear signal / No reading yet. Raw BLE diagnostic values are needed
+before tuning. In particular, the current estimator assumes a 14-bit clipping
+boundary from the configured baseline; a mismatch with actual channel scaling
+would reject all samples. Do not increase LED current or relax periodicity
+checks merely to make a plausible number appear.
 
 HR transfers use a mutex-protected bounded port, rather than cancelling a DMA
 future while its sample buffer is live. Ordinary small transfers briefly block
