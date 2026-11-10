@@ -1,6 +1,47 @@
 use crate::heart_rate::{Estimator, Phase, Reading, State, MAX_MEASUREMENT_MS};
 
 #[test]
+fn isolated_candidates_and_rate_jumps_need_sustained_confirmation() {
+    use crate::heart_rate::RateConfirmation;
+    let mut confirmation = RateConfirmation::new();
+    for (bpm, at) in [
+        (130, 1000),
+        (130, 1500),
+        (88, 2200),
+        (188, 4000),
+        (214, 5000),
+    ] {
+        assert_eq!(confirmation.candidate(bpm, at), None);
+    }
+    let mut confirmation = RateConfirmation::new();
+    for at in [0, 700, 1400, 2100, 2800] {
+        assert_eq!(confirmation.candidate(88, at), None);
+    }
+    assert_eq!(confirmation.candidate(88, 3500), Some(88));
+    assert_eq!(confirmation.candidate(214, 3800), None);
+    assert_eq!(confirmation.candidate(214, 7000), None); // Long gap resets.
+    assert_eq!(confirmation.candidate(214, 6900), None); // Invalid time resets.
+    assert_eq!(confirmation.candidate(0, 7100), None);
+    assert_eq!(confirmation.candidate(88, 7200), None);
+}
+
+#[test]
+fn short_periodic_bursts_are_not_published_as_stable_pulse() {
+    for bpm in [130, 188, 214] {
+        let mut estimator = Estimator::new();
+        for index in 0..750 {
+            let now = index * 40;
+            let wave = if now < 4800 {
+                200.0 * (now as f64 * f64::from(bpm) / 60000.0 * std::f64::consts::TAU).sin()
+            } else {
+                0.0
+            };
+            assert_eq!(estimator.sample((7000.0 + wave) as u32, 6, now), None);
+        }
+    }
+}
+
+#[test]
 fn analog_gain_calibration_handles_observed_weak_signal_and_retains_headroom() {
     use crate::heart_rate::target_gain;
     for (gain, min, max, expected) in [
@@ -59,8 +100,8 @@ fn synthetic_periodic_signals_have_consistent_rate_without_invented_startup_bpm(
             let raw = (12000.0 + phase.sin() * 200.0) as u32;
             if let Some(found) = estimator.sample(raw, 10, now) {
                 assert!(
-                    now >= 2960,
-                    "two-second settling plus at least four beat intervals"
+                    now >= 8800,
+                    "six-second waveform plus sustained candidate confirmation"
                 );
                 results.push(found);
             }
@@ -219,7 +260,7 @@ fn scheduled_jitter_uses_real_beat_times_and_diagnostics_have_a_versioned_layout
         gain: 4,
     };
     let value = diag.encode(state, 1040);
-    assert_eq!(&value[..4], &[2, 1, 72, 0]);
+    assert_eq!(&value[..4], &[3, 1, 72, 0]);
     let packed = u16::from_le_bytes(value[4..6].try_into().unwrap());
     assert_eq!(packed & 0x0fff, 25);
     assert_eq!(packed >> 12, 4);
@@ -227,7 +268,7 @@ fn scheduled_jitter_uses_real_beat_times_and_diagnostics_have_a_versioned_layout
     assert_eq!(u32::from_le_bytes(value[10..14].try_into().unwrap()), 678);
     assert_eq!(u16::from_le_bytes(value[14..16].try_into().unwrap()), 12000);
     assert_eq!(u16::from_le_bytes(value[16..18].try_into().unwrap()), 12400);
-    assert_eq!(u16::from_le_bytes(value[18..20].try_into().unwrap()), 40);
+    assert_eq!(u16::from_le_bytes(value[18..20].try_into().unwrap()), 1000);
 }
 
 #[test]

@@ -54,7 +54,11 @@ The owner requests samples at 40 ms intervals and uses actual monotonic times.
 It does not replay missed samples in a catch-up burst. PPG processing uses an
 integer DC estimate, three-sample smoothing, an adaptive amplitude threshold,
 four consistent beat intervals and delayed waveform similarity over a bounded
-eight-second buffer. Flat/dark/clipped signals, large timing gaps and unstable
+eight-second buffer. At least six seconds of waveform and four qualifying rate
+candidates spanning at least three seconds are required before publishing.
+Candidates must remain within 10% (minimum allowance 6 BPM) of their first rate;
+an inconsistent waveform, large rate change or candidate gap resets confirmation.
+Gain changes reset all signal history. Flat/dark/clipped signals, large timing gaps and unstable
 intervals are rejected. Rates are restricted to 30–220 BPM. Periodic motion can
 still mimic a pulse: these are experimental estimates, not medical measurements.
 Synthetic tests are regression checks, not validation on people or movement.
@@ -72,6 +76,13 @@ calibration addresses this hypothesis without relaxing pulse-quality checks.
 It still requires another physical test: weak optical coupling or absence of a
 detectable pulse cannot be fixed by amplifying noise. The configured 14-bit
 clipping boundary remains an assumption to validate against real waveforms.
+
+The second closed-watch test after gain calibration produced isolated values
+130/88, 188 and 214 BPM reported as too high, with no values visible in Furu.
+That is not a successful accuracy test. Sustained confirmation now rejects
+short periodic bursts instead of showing a value from a few matching peaks.
+It cannot prove physiological origin or fix double-counting without actual
+waveforms. Capture the diagnostic stream before further filter tuning.
 
 HR transfers use a mutex-protected bounded port, rather than cancelling a DMA
 future while its sample buffer is live. Ordinary small transfers briefly block
@@ -93,18 +104,34 @@ The persistent GATT listener remains alive during HR notifications and DFU.
 
 Developer-only read diagnostic: `6b6f180d-1886-4b40-ae7d-00a11ce50001` under
 the HR service. Read it in nRF Connect and send its 20 hex bytes if acquisition
-fails on a closed watch. It does not itself start measurement or stream raw PPG.
+fails on a closed watch. It does not itself start measurement. It now supports
+opt-in notifications containing raw optical samples during an explicit watch
+measurement; an ordinary 0x2a37 subscription does not enable this debug stream.
+The latest-value transport can drop intermediate frames if BLE falls behind:
+use the sample counter and elapsed sample time to identify gaps. No optical
+history is retained after measurement.
 
 | Bytes | Value |
 | --- | --- |
-| 0 | Version 2 (version 1 used fixed x1 gain) |
+| 0 | Version 3 (version 1 used fixed x1 gain) |
 | 1 | Phase: 0 idle, 1 measuring, 2 no signal, 3 missing, 4 fault |
 | 2 | Live BPM (0 unavailable) |
 | 3 | Last error: 0 none, 1 bus, 2 wrong ID, 3 not running, 4 invalid gain, 0x80 OR register address for readback failure |
 | 4–5 | u16 LE: low 12 bits sample count (saturated at 4095), high 4 bits gain multiplier (1/2/4/8). Version 1 used the whole u16 for count. |
 | 6–9 / 10–13 | Latest PPG / ambient, u32 LE |
 | 14–15 / 16–17 | Last reporting window PPG min / max, u16 LE (saturated) |
-| 18–19 | Sample age in ms, u16 LE (65535 if unavailable/too old) |
+| 18–19 | Sample elapsed time since measurement start in ms, u16 LE (65535 unavailable). Versions 1/2 used sample age instead. |
+
+To capture a waveform without ST-Link: disconnect Furu, connect nRF Connect,
+refresh services if the diagnostic notification property is missing, enable
+notifications on the custom diagnostic characteristic and on 0x2a37, then start
+Measure on the watch. Keep still for the full measurement and export/share the
+nRF Connect log. The custom stream contains optical data and the standard HR
+stream tells us which BPM values were actually delivered. Timestamps and gain
+are included so gain transitions and missed samples can be excluded in analysis.
+In Furu's companion diagnostic build, Logs now records raw HR read/notification
+payloads and parsing results. Subscription teardown/setup is serialized so an
+outdated async operation cannot unsubscribe a newly installed listener.
 
 ## Physical test sequence
 

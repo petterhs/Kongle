@@ -636,13 +636,15 @@ async fn heart_task(bus: &'static device::i2c::Bus) {
                             }
                         }
                         sender.send(state);
-                        HEART_DIAGNOSTICS.sender().send(diagnostic);
                         window_min = u32::MAX;
                         window_max = 0;
                         window_samples = 0;
                         defmt::debug!("[hr] PPG {}, ambient {}", sample.ppg, sample.ambient);
                         publish_at = now + Duration::from_secs(1);
                     }
+                    // Latest-value debug stream; no queue or raw sample history.
+                    // Only an explicitly subscribed diagnostic client transmits it.
+                    HEART_DIAGNOSTICS.sender().send(diagnostic);
                 }
                 Err(error) => {
                     diagnostic.error = heart_error(&error);

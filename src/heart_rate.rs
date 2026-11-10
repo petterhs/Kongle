@@ -48,10 +48,10 @@ impl Diagnostics {
     };
 
     /// Version, phase, live BPM, last error, gain/count LE, PPG/ALS u32 LE,
-    /// one-second PPG min/max u16 LE, sample age milliseconds u16 LE.
+    /// one-second PPG min/max u16 LE, sample elapsed milliseconds u16 LE.
     pub fn encode(self, state: State, now_ms: u64) -> [u8; 20] {
         let mut bytes = [0; 20];
-        bytes[0] = 2;
+        bytes[0] = 3;
         bytes[1] = match state.phase {
             Phase::Idle => 0,
             Phase::Measuring => 1,
@@ -67,12 +67,14 @@ impl Diagnostics {
         bytes[10..14].copy_from_slice(&self.ambient.to_le_bytes());
         bytes[14..16].copy_from_slice(&self.min.to_le_bytes());
         bytes[16..18].copy_from_slice(&self.max.to_le_bytes());
-        let age = if self.samples == 0 {
+        let elapsed = if self.samples == 0 {
             u16::MAX
         } else {
-            now_ms.saturating_sub(self.at_ms).min(u64::from(u16::MAX)) as u16
+            self.at_ms
+                .saturating_sub(state.started_ms)
+                .min(u64::from(u16::MAX)) as u16
         };
-        bytes[18..20].copy_from_slice(&age.to_le_bytes());
+        bytes[18..20].copy_from_slice(&elapsed.to_le_bytes());
         bytes
     }
 }
@@ -152,6 +154,46 @@ impl State {
     }
 }
 
+/// Reject isolated candidates and large rate changes. This confirms temporal
+/// consistency, not physiological origin: periodic motion can still pass.
+pub struct RateConfirmation {
+    anchor: u8,
+    count: u8,
+    first_ms: u64,
+    last_ms: u64,
+}
+
+impl RateConfirmation {
+    pub const fn new() -> Self {
+        Self {
+            anchor: 0,
+            count: 0,
+            first_ms: 0,
+            last_ms: 0,
+        }
+    }
+
+    pub fn candidate(&mut self, bpm: u8, now_ms: u64) -> Option<u8> {
+        if !(30..=220).contains(&bpm) {
+            *self = Self::new();
+            return None;
+        }
+        if self.count == 0
+            || now_ms <= self.last_ms
+            || now_ms - self.last_ms > 2500
+            || bpm.abs_diff(self.anchor) > (self.anchor / 10).max(6)
+        {
+            self.anchor = bpm;
+            self.count = 1;
+            self.first_ms = now_ms;
+        } else {
+            self.count = self.count.saturating_add(1);
+        }
+        self.last_ms = now_ms;
+        (self.count >= 4 && now_ms.saturating_sub(self.first_ms) >= 3000).then_some(bpm)
+    }
+}
+
 pub struct Estimator {
     dc: Option<i32>,
     smooth: [i32; 3],
@@ -166,6 +208,7 @@ pub struct Estimator {
     waveform: [i16; 200],
     waveform_cursor: usize,
     waveform_count: usize,
+    confirmation: RateConfirmation,
 }
 
 impl Estimator {
@@ -184,11 +227,14 @@ impl Estimator {
             waveform: [0; 200],
             waveform_cursor: 0,
             waveform_count: 0,
+            confirmation: RateConfirmation::new(),
         }
     }
 
     fn periodic(&self, lag: usize) -> bool {
-        if lag == 0 || self.waveform_count < lag * 3 {
+        // A few matching high-frequency peaks are not enough. Use at least
+        // six seconds of waveform as well as three candidate periods.
+        if lag == 0 || self.waveform_count < 150 || self.waveform_count < lag * 3 {
             return false;
         }
         let count = self.waveform_count;
@@ -257,6 +303,7 @@ impl Estimator {
         self.peak_ms = Some(peak);
         if elapsed > 2040 {
             self.interval_count = 0;
+            self.confirmation = RateConfirmation::new();
             return None;
         }
         self.intervals.rotate_left(1);
@@ -273,11 +320,16 @@ impl Estimator {
             .iter()
             .any(|v| v.abs_diff(median) > median / 5 + 40)
         {
+            self.confirmation = RateConfirmation::new();
             return None;
         }
         let bpm = (60_000 + median / 2) / median;
-        ((30..=220).contains(&bpm)
-            && self.periodic(((u64::from(median) + SAMPLE_MS / 2) / SAMPLE_MS) as usize))
-        .then_some(bpm as u8)
+        if !(30..=220).contains(&bpm)
+            || !self.periodic(((u64::from(median) + SAMPLE_MS / 2) / SAMPLE_MS) as usize)
+        {
+            self.confirmation = RateConfirmation::new();
+            return None;
+        }
+        self.confirmation.candidate(bpm as u8, now_ms)
     }
 }
