@@ -19,6 +19,9 @@ mod firmware_state;
 mod flash;
 mod haptics;
 mod media;
+// Transport is host-tested before enabling the step engine on hardware.
+#[allow(dead_code)]
+mod motion;
 mod notifications;
 mod ota;
 #[path = "ui/theme.rs"]

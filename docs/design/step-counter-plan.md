@@ -1,7 +1,9 @@
 # Step measurement for Kongle 0.4.0
 
 Status: shared I2C transport and a read-only startup probe are implemented on
-`feature/sensor-foundation`; the step engine is not enabled. Goal: reliable wrist-worn counting with low idle cost,
+`feature/sensor-foundation`. A Rust transport for loading the matched Bosch
+configuration and reading its cumulative counter is host-tested but not yet
+enabled on hardware. Goal: reliable wrist-worn counting with low idle cost,
 documented limitations and reproducible tests. Improvement over another firmware
 must be demonstrated on measured cases, not inferred from a rewritten driver.
 
@@ -56,6 +58,21 @@ message from RTT, then check touch/swipes, display sleep/wake and BLE together.
 A missing sensor must log an error and leave the rest of the watch usable.
 Record the returned ID before selecting a variant configuration. A successful
 read alone does not establish which configuration blob is safe to load.
+
+The next build can call `motion::Motion::initialize` with a whole-operation
+timeout after this check. It uses verified 6144-byte streams for IDs 0x11/0x13
+with documented hashes and BSD notices in `src/device/bosch/`. It checks ASIC
+status, feature enable readback, acceleration configuration and power registers.
+Transport tests exercise both variants, upload failure, bad ASIC status,
+unknown chips and feature readback failures. These establish protocol handling,
+not physical initialization or counting accuracy.
+
+Before enabling/distributing the step engine: increase the shared TWIM transmit
+buffer to at least 17 bytes; preserve the Bosch notice in binary release
+materials; test cancellation and error cleanup without disrupting touch; and
+verify whether initialization without a soft reset works after each boot path.
+The driver deliberately sends no soft reset: the reference PineTime setup
+requires TWI recovery after that command, which needs its own hardware audit.
 
 ## 2. Establish a baseline before tuning
 

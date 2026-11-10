@@ -12,6 +12,7 @@ ota-activation = []
 chrono = { version = "=0.4.43", default-features = false }
 display-interface = "=0.5.0"
 embedded-hal = "=1.0.0"
+embedded-hal-async = "=1.0.0"
 embedded-graphics = "=0.8.1"
 embedded-iconoir = { version = "=0.2.3", default-features = false, features = ["24px"] }
 eg-seven-segment = "=0.2.0"
