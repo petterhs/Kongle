@@ -22,6 +22,7 @@ mod media;
 mod motion;
 mod notifications;
 mod ota;
+mod steps;
 #[path = "ui/theme.rs"]
 mod theme;
 mod touch;
@@ -113,7 +114,8 @@ static NOTIFICATION_CH: Channel<CriticalSectionRawMutex, notifications::Notifica
 static MEDIA_WATCH: Watch<CriticalSectionRawMutex, media::State, 2> = Watch::new();
 static MEDIA_COMMANDS: Channel<CriticalSectionRawMutex, media::Request, 4> = Channel::new();
 static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
-static MOTION_WATCH: Watch<CriticalSectionRawMutex, Option<u32>, 1> = Watch::new();
+static MOTION_WATCH: Watch<CriticalSectionRawMutex, steps::State, 1> = Watch::new();
+static STEP_DATE: Watch<CriticalSectionRawMutex, Option<chrono::NaiveDate>, 1> = Watch::new();
 static VIBRATIONS: Channel<CriticalSectionRawMutex, haptics::Pattern, 4> = Channel::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
 static FLASH_CELL: StaticCell<AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>> =
@@ -146,13 +148,22 @@ async fn clock_task(
         chrono::NaiveTime::from_hms_opt(11, 0, 0).unwrap(),
     );
     sender.send(TimeState::from_naive(dt));
+    let mut synchronized = false;
+    let mut step_date = None;
+    STEP_DATE.sender().send(None);
     let mut ticker = Ticker::every(Duration::from_secs(1));
     loop {
         ticker.next().await;
         if let Ok(new_dt) = set_time_rx.try_receive() {
             dt = new_dt;
+            synchronized = true;
         } else {
             dt = current_time::next_cts_second(dt);
+        }
+        let date = synchronized.then_some(dt.date());
+        if date != step_date {
+            STEP_DATE.sender().send(date);
+            step_date = date;
         }
         sender.send(TimeState::from_naive(dt));
     }
@@ -375,7 +386,7 @@ async fn motion_task(
 ) {
     let mut sensor = motion::Motion::new(bus, embassy_time::Delay);
     let sender = MOTION_WATCH.sender();
-    sender.send(None);
+    sender.send(steps::State::EMPTY);
     defmt::info!("[motion] initializing step engine");
     match embassy_time::with_timeout(Duration::from_secs(8), sensor.initialize()).await {
         Ok(Ok(config)) => {
@@ -407,18 +418,30 @@ async fn motion_task(
     }
     let mut previous = None;
     let mut failures = 0;
+    let mut counts = steps::Counts::new(Instant::now().as_millis());
+    let mut date_rx = STEP_DATE.receiver().unwrap();
     loop {
         match embassy_time::with_timeout(Duration::from_millis(500), sensor.counter()).await {
             Ok(Ok(raw)) => {
                 failures = 0;
-                sender.send(Some(raw));
+                let date = date_rx.try_get().flatten();
+                match counts.observe(raw, Instant::now().as_millis(), date) {
+                    Ok(state) => sender.send(state),
+                    Err(error) => {
+                        sender.send(counts.unavailable());
+                        defmt::warn!(
+                            "[motion] count discontinuity: {:?}",
+                            defmt::Debug2Format(&error)
+                        );
+                    }
+                }
                 if previous != Some(raw) {
                     defmt::info!("[motion] raw steps: {}", raw);
                     previous = Some(raw);
                 }
             }
             result => {
-                sender.send(None);
+                sender.send(counts.unavailable());
                 failures += 1;
                 defmt::warn!(
                     "[motion] counter read failed: {:?}",
@@ -437,9 +460,10 @@ async fn motion_task(
         // promptly on wake; background reads are bounded rather than per-step.
         let interval = if awake { 5 } else { 30 };
         let _ = awake_rx.try_changed();
+        let _ = date_rx.try_changed();
         embassy_futures::select::select(
             Timer::after(Duration::from_secs(interval)),
-            awake_rx.changed(),
+            embassy_futures::select::select(awake_rx.changed(), date_rx.changed()),
         )
         .await;
     }

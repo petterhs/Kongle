@@ -1,9 +1,12 @@
 # Step measurement for Kongle 0.4.0
 
-Status: the maintainer's read-only dev-watch probe returned chip ID `0x11`.
-`feature/sensor-foundation` now initializes the matching Bosch engine and
-displays raw cumulative counts. This active build still needs hardware testing;
-daily totals, persistence and BLE reporting are not implemented yet.
+Status: the maintainer verified BMA421 startup (chip ID `0x11`, configuration
+`0x0071`, accel `0x28`, range `0x00`), raw count changes and working touch after
+the sensor-reset fix. Shaking is only a responsiveness check, not an accuracy
+test. `feature/sensor-foundation` now adds RAM daily accounting and the read-only
+InfiniTime step-count BLE field; these additions need hardware testing.
+Persistence, gait accuracy and power validation remain open. The dev watch's
+HR sensor has fallen off; heart-rate hardware tests require a closed device.
 Goal: reliable wrist-worn counting with low idle cost,
 documented limitations and reproducible tests. Improvement over another firmware
 must be demonstrated on measured cases, not inferred from a rewritten driver.
@@ -68,9 +71,11 @@ KONGLE_FEATURES=mcuboot,ota-activation,touch-wake-debug bash scripts/flash_app.s
 Capture `[motion] ... ready; config ID ..., accel 28, range 00` followed by
 `[motion] raw steps: ...`, or the initialization error. Check touch, BLE and
 screen sleep/wake during and after initialization. Test a small counted walk
-and wait for delayed/batched sensor reporting. These values are sensor totals,
-not daily counts; each firmware boot now resets them. They are intentionally
-not exposed as daily steps through BLE yet.
+and wait for delayed/batched sensor reporting. RTT logs retain raw sensor counts.
+The UI displays session steps until CTS sync, then the partial daily total.
+Activity distinguishes these and shows undated steps. Each firmware boot resets
+the sensor and RAM totals. The read-only Motion Service returns the daily total
+as u32 LE, and an ATT error when the sensor/time/current-date sample is missing.
 
 The first active hardware test failed with the old generic `Readback` error;
 touch continued to work. Initialization now follows Bosch's APS handoff after
@@ -87,6 +92,9 @@ remain strict; diagnostic detail is not a reason to accept invalid settings.
 The shared TWIM buffer now holds 32 bytes. Reads happen every five seconds
 awake and thirty seconds asleep, plus screen-state transitions; counting stays
 on the sensor. This polling is a baseline, not a final power optimization.
+First time sync and date changes trigger an extra sample without polling time
+over I2C. Date changes never reset the hardware counter. The default boot clock
+does not count as synchronized: a valid CTS write must reach the clock task.
 Read errors publish unavailable rather than zero. Three consecutive errors stop
 acquisition without resetting the shared bus or touch. Initialization/read
 operations and best-effort shutdown have bounded timeouts.
@@ -192,6 +200,23 @@ read by Furu (`00030000-…` / `00030001-…`, u32 LE). Send source/reset/time m
 through a separately versioned capability if needed for history; Furu must not
 double-count the same sample after reconnect. Keep diagnostics available for
 test runs without making the ordinary watch UI a debug console.
+
+The initial RAM implementation keeps three date buckets so moving the clock
+backward and forward does not erase/recount recent totals. Older buckets are
+evicted; this is not historical storage. Counts before first time sync and
+batches spanning a date transition go to an undated total, because the hardware
+counter has no per-step timestamps. This can omit up to a polling interval's
+worth of steps from a daily total at midnight/clock correction; those steps
+remain in the session/undated accounting instead of being assigned arbitrarily.
+There is no promise of a complete day after boot or time sync.
+
+Counter resets/corruption are rejected using a broad cadence-plus-batch sanity
+bound, then rebased without inventing a huge unsigned delta. Normal unsigned
+wrap is handled; this guard is not gait tuning. Failed reads publish unavailable
+but preserve the previous baseline so a later successful read recovers its
+delta. Pure tests cover sync, midnight, backward dates, missing reads, wrap,
+counter resets and stale-date BLE reads. Furu's companion sensor branch enables
+its existing step capability and clears stale step values on read errors.
 
 ## 6. Power and release gate
 

@@ -10,6 +10,8 @@ mod language;
 mod media;
 #[path = "../../../src/motion.rs"]
 mod motion;
+#[path = "../../../src/steps.rs"]
+mod steps;
 #[path = "../../../src/ui/theme.rs"]
 mod theme;
 #[path = "../../../src/ui.rs"]

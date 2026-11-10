@@ -16,26 +16,33 @@ fn live_steps_only_redraw_their_region_and_never_overwrite_media() {
     let mut frame = Frame::new();
     render(&mut ui, &mut frame);
     let before = frame.pixels.clone();
-    assert!(ui.set_steps(Some(12345)));
+    let steps = crate::steps::State {
+        session: Some(12345),
+        ..crate::steps::State::EMPTY
+    };
+    assert!(ui.set_steps(steps));
     ui.draw_steps(&mut frame);
     assert_eq!(before[..169 * 240], frame.pixels[..169 * 240]);
     assert_eq!(before[199 * 240..], frame.pixels[199 * 240..]);
     assert_ne!(before, frame.pixels);
-    assert!(!ui.set_steps(Some(12345)));
+    assert!(!ui.set_steps(steps));
 
     ui.handle_touch(TouchEvent::Tap { x: 50, y: 180 });
     render(&mut ui, &mut frame);
     let before = frame.pixels.clone();
-    ui.set_steps(None);
+    ui.set_steps(crate::steps::State::EMPTY);
     ui.draw_steps(&mut frame);
     assert_eq!(before[..32 * 240], frame.pixels[..32 * 240]);
-    assert_eq!(before[148 * 240..], frame.pixels[148 * 240..]);
+    assert_eq!(before[212 * 240..], frame.pixels[212 * 240..]);
     assert_ne!(before, frame.pixels);
 
     ui.open_media();
     render(&mut ui, &mut frame);
     let before = frame.pixels.clone();
-    ui.set_steps(Some(u32::MAX));
+    ui.set_steps(crate::steps::State {
+        session: Some(u32::MAX),
+        ..crate::steps::State::EMPTY
+    });
     ui.draw_steps(&mut frame);
     assert_eq!(before, frame.pixels);
     assert_eq!(frame.clipped, 0);

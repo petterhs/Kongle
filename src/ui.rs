@@ -199,7 +199,7 @@ pub struct WatchUi {
     ble_address: Option<[u8; 6]>,
     media: crate::media::State,
     media_request: Option<crate::media::Request>,
-    steps: Option<u32>,
+    steps: crate::steps::State,
 }
 
 impl WatchUi {
@@ -221,7 +221,7 @@ impl WatchUi {
             ble_address: None,
             media: crate::media::State::new(),
             media_request: None,
-            steps: None,
+            steps: crate::steps::State::EMPTY,
         }
     }
 
@@ -265,7 +265,7 @@ impl WatchUi {
         changed
     }
 
-    pub fn set_steps(&mut self, steps: Option<u32>) -> bool {
+    pub fn set_steps(&mut self, steps: crate::steps::State) -> bool {
         let changed = self.steps != steps;
         self.steps = steps;
         changed
@@ -283,7 +283,7 @@ impl WatchUi {
             }
             Page::Activity => {
                 if !self.skip_clear {
-                    let _ = Rectangle::new(Point::new(16, 32), Size::new(208, 116))
+                    let _ = Rectangle::new(Point::new(16, 32), Size::new(208, 180))
                         .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
                         .draw(display);
                 }
@@ -293,15 +293,17 @@ impl WatchUi {
                     .background_color(theme::BACKGROUND)
                     .build();
                 let mut count: String<10> = String::new();
-                if let Some(steps) = self.steps {
+                if let Some(steps) = self.steps.displayed() {
                     let _ = write!(&mut count, "{}", steps);
                 } else {
                     let _ = count.push_str("--");
                 }
                 let _ = Text::new(&count, Point::new(20, 60), style).draw(display);
                 let _ = Text::new(
-                    if self.steps.is_some() {
-                        self.tr("Sensor total", "Sensortotal")
+                    if self.steps.daily.is_some() {
+                        self.tr("Today", "I dag")
+                    } else if self.steps.session.is_some() {
+                        self.tr("Since boot", "Siden oppstart")
                     } else {
                         self.tr("Steps unavailable", "Skritt utilgjengelig")
                     },
@@ -310,11 +312,25 @@ impl WatchUi {
                 )
                 .draw(display);
                 let _ = Text::new(
-                    self.tr("Not a daily total", "Ikke en dagssum"),
+                    if self.steps.daily.is_some() {
+                        self.tr("RAM only", "Kun i RAM")
+                    } else if self.steps.session.is_none() {
+                        self.tr("Sensor unavailable", "Sensor utilgjengelig")
+                    } else {
+                        self.tr("Clock not synced", "Tid ikke synket")
+                    },
                     Point::new(20, 134),
                     style,
                 )
                 .draw(display);
+                let mut unassigned: String<20> = String::new();
+                let _ = write!(
+                    &mut unassigned,
+                    "{}: {}",
+                    self.tr("Undated", "Udatert"),
+                    self.steps.unassigned
+                );
+                let _ = Text::new(&unassigned, Point::new(20, 180), style).draw(display);
             }
             _ => {}
         }
@@ -537,7 +553,7 @@ impl WatchUi {
         // Remote fields are omitted until an integration enables them.
         let style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
-            .text_color(if self.steps.is_some() {
+            .text_color(if self.steps.displayed().is_some() {
                 theme::STEPS
             } else {
                 theme::MUTED
@@ -545,7 +561,7 @@ impl WatchUi {
             .background_color(theme::BACKGROUND)
             .build();
         let mut count: String<10> = String::new();
-        if let Some(steps) = self.steps {
+        if let Some(steps) = self.steps.displayed() {
             let _ = write!(&mut count, "{}", steps);
         } else {
             let _ = count.push_str("--");
