@@ -234,3 +234,26 @@ custom diagnostic stream in nRF Connect for a complete still measurement,
 as described above, and retain its log for waveform analysis. This is the
 first physical test of the reference setup and new estimator, not a validated
 accuracy improvement. Do not tune thresholds further without examining data.
+
+### Replay a captured optical trace on the host
+
+Export a chronological text log from nRF Connect containing notifications from
+the custom diagnostic characteristic. The converter accepts diagnostic version
+3 only; older versions encode sample age rather than elapsed sampling time.
+
+```bash
+python scripts/hr-diagnostics-to-csv.py /path/to/nrf-log.txt --output /tmp/hr.csv
+cargo run --locked --manifest-path tests/host/Cargo.toml \
+  --target "$(rustc -vV | sed -n 's/^host: //p')" \
+  --example replay-heart-rate -- /tmp/hr.csv
+```
+
+Run inside `devenv shell`. The CSV includes raw optical channels, captured BPM,
+gain, elapsed time, sample counter and missing-sample counts. Repeated reads of
+the same sample are deduplicated; reset markers/counter rollback separate
+measurement sessions. The replay tool compiles the actual firmware estimator
+and reports qualified BPM separately from the captured device result. It resets
+on session/gain changes and does not fill missing samples. Current firmware
+expects 100 ms cadence; old 40 ms captures are not silently resampled. Capture
+gaps can therefore prevent readings even if the watch processed a contiguous
+stream, and replay results alone do not prove physical accuracy.
