@@ -1,27 +1,14 @@
-//! On-demand pulse state and a conservative, integer PPG baseline estimator.
+//! On-demand pulse state and an integer, windowed PPG frequency estimator.
 //! This is not a medically validated algorithm. Hardware waveform validation
 //! and comparison with a reference are required before release.
 pub const MAX_MEASUREMENT_MS: u64 = 45_000;
-pub const SAMPLE_MS: u64 = 40;
+pub const SAMPLE_MS: u64 = 100;
 pub const FRESH_MS: u64 = 30_000;
-// HRS and ALS use the driver's fixed 0x66 (14-bit) configuration.
-const ADC_CLIP: u32 = 0x3ff8;
-
-/// Bounded analog calibration with headroom and hysteresis. Do not lower the
-/// pulse-quality checks to turn a weak/noisy signal into a plausible number.
-pub fn target_gain(current: u8, min: u32, max: u32) -> u8 {
-    if min > max || ![1, 2, 4, 8].contains(&current) {
-        return current;
-    }
-    if max >= 12_000 && current > 1 {
-        return current / 2;
-    }
-    let midpoint = min + (max - min) / 2;
-    if max < 5500 && current < 8 && (midpoint < 4000 || max - min < 32) {
-        return current * 2;
-    }
-    current
-}
+// Keep conversion range and all filter/window time scales aligned with the
+// 15-bit / 10 Hz reference acquisition. These are not accuracy guarantees.
+const ADC_CLIP: u32 = 0x7ff8;
+const WINDOW_SAMPLES: usize = (8000 / SAMPLE_MS) as usize;
+include!("heart_rate_coefficients.rs");
 
 #[derive(Clone, Copy)]
 pub struct Diagnostics {
@@ -194,142 +181,195 @@ impl RateConfirmation {
     }
 }
 
+/// Fixed-size window estimator. Independently implemented Goertzel frequency
+/// search plus delayed waveform validation, rather than individual peak counts.
+/// Ordinary least-squares detrending and windowing use integer arithmetic only.
 pub struct Estimator {
-    dc: Option<i32>,
-    smooth: [i32; 3],
+    raw: [u16; WINDOW_SAMPLES],
+    times: [u16; WINDOW_SAMPLES],
     cursor: usize,
-    envelope: i32,
-    previous: [i32; 2],
+    count: usize,
     previous_ms: Option<u64>,
-    started_ms: Option<u64>,
-    peak_ms: Option<u64>,
-    intervals: [u32; 4],
-    interval_count: usize,
-    waveform: [i16; 200],
-    waveform_cursor: usize,
-    waveform_count: usize,
+    next_analysis_ms: u64,
     confirmation: RateConfirmation,
 }
 
 impl Estimator {
     pub const fn new() -> Self {
         Self {
-            dc: None,
-            smooth: [0; 3],
+            raw: [0; WINDOW_SAMPLES],
+            times: [0; WINDOW_SAMPLES],
             cursor: 0,
-            envelope: 0,
-            previous: [0; 2],
+            count: 0,
             previous_ms: None,
-            started_ms: None,
-            peak_ms: None,
-            intervals: [0; 4],
-            interval_count: 0,
-            waveform: [0; 200],
-            waveform_cursor: 0,
-            waveform_count: 0,
+            next_analysis_ms: 0,
             confirmation: RateConfirmation::new(),
         }
     }
 
-    fn periodic(&self, lag: usize) -> bool {
-        // A few matching high-frequency peaks are not enough. Use at least
-        // six seconds of waveform as well as three candidate periods.
-        if lag == 0 || self.waveform_count < 150 || self.waveform_count < lag * 3 {
-            return false;
-        }
-        let count = self.waveform_count;
-        let start = (self.waveform_cursor + 200 - count) % 200;
-        let (mut dot, mut aa, mut bb, mut a_sum, mut b_sum) = (0i64, 0i64, 0i64, 0i64, 0i64);
-        for index in lag..count {
-            let a = i64::from(self.waveform[(start + index) % 200]);
-            let b = i64::from(self.waveform[(start + index - lag) % 200]);
+    // Linear interpolation permits sub-sample periods at 10 Hz. The score
+    // penalizes energy mismatch as well as phase mismatch, and is bounded by
+    // Cauchy-Schwarz. i64 accumulation is safe for 80 signed 16-bit samples.
+    fn similarity(wave: &[i16; WINDOW_SAMPLES], period_ms: usize) -> i32 {
+        let lag = period_ms / SAMPLE_MS as usize;
+        let fraction = period_ms % SAMPLE_MS as usize;
+        let skip = lag + usize::from(fraction != 0);
+        let mut dot = 0i64;
+        let mut energy = 0i64;
+        let mut a_sum = 0i64;
+        let mut b_sum = 0i64;
+        for i in skip..WINDOW_SAMPLES {
+            let a = i64::from(wave[i]);
+            let near = i64::from(wave[i - lag]);
+            let b = if fraction == 0 {
+                near
+            } else {
+                let far = i64::from(wave[i - lag - 1]);
+                (near * (SAMPLE_MS as usize - fraction) as i64 + far * fraction as i64)
+                    / SAMPLE_MS as i64
+            };
             dot += a * b;
-            aa += a * a;
-            bb += b * b;
+            energy += a * a + b * b;
             a_sum += a;
             b_sum += b;
         }
-        let pairs = (count - lag) as i64;
-        dot -= a_sum * b_sum / pairs;
-        aa -= a_sum * a_sum / pairs;
-        bb -= b_sum * b_sum / pairs;
-        // Normalized delayed similarity >= 0.65, without floats or sqrt.
-        aa > 0 && bb > 0 && dot > 0 && dot * 2000 >= (aa + bb) * 650
+        let n = (WINDOW_SAMPLES - skip) as i64;
+        dot -= a_sum * b_sum / n;
+        energy -= (a_sum * a_sum + b_sum * b_sum) / n;
+        if energy <= 0 || dot <= 0 {
+            return 0;
+        }
+        (dot * 20_000 / energy) as i32
     }
 
-    /// Returns a new reading only on a qualifying beat. Timing uses actual
-    /// monotonic timestamps; delayed BLE/I2C scheduling cannot fabricate BPM.
+    fn frequency_energy(wave: &[i16; WINDOW_SAMPLES], coefficient: i16) -> u64 {
+        let (mut previous, mut before_previous) = (0i64, 0i64);
+        for sample in wave {
+            let next =
+                i64::from(*sample) + ((i64::from(coefficient) * previous) >> 14) - before_previous;
+            before_previous = previous;
+            previous = next;
+        }
+        (previous * previous + before_previous * before_previous
+            - (((i64::from(coefficient) * previous) >> 14) * before_previous))
+            .max(0) as u64
+    }
+
+    fn estimate(&self) -> Option<u8> {
+        let mut wave = [0i16; WINDOW_SAMPLES];
+        let mut sum = 0i64;
+        let mut covariance = 0i64;
+        let mut x_energy = 0i64;
+        let mut min = u16::MAX;
+        let mut max = 0u16;
+        for i in 0..WINDOW_SAMPLES {
+            let raw = self.raw[(self.cursor + i) % WINDOW_SAMPLES];
+            let x = 2 * i as i64 - (WINDOW_SAMPLES - 1) as i64;
+            sum += i64::from(raw);
+            covariance += x * i64::from(raw);
+            x_energy += x * x;
+            min = min.min(raw);
+            max = max.max(raw);
+        }
+        // Keep the old estimator's minimum observable pulse swing; gain is
+        // fixed for this acquisition experiment, so no amplification of noise.
+        if max - min < 16 {
+            return None;
+        }
+        // A good burst retained in an old part of the window must not keep
+        // producing fresh readings after the optical waveform has gone flat.
+        for quarter in 0..4 {
+            let mut low = u16::MAX;
+            let mut high = 0u16;
+            for i in quarter * (WINDOW_SAMPLES / 4)..(quarter + 1) * (WINDOW_SAMPLES / 4) {
+                let raw = self.raw[(self.cursor + i) % WINDOW_SAMPLES];
+                low = low.min(raw);
+                high = high.max(raw);
+            }
+            if high - low < 16 {
+                return None;
+            }
+        }
+        for (i, value) in wave.iter_mut().enumerate() {
+            let raw = i64::from(self.raw[(self.cursor + i) % WINDOW_SAMPLES]);
+            let x = 2 * i as i64 - (WINDOW_SAMPLES - 1) as i64;
+            *value = (raw - sum / WINDOW_SAMPLES as i64 - covariance * x / x_energy)
+                .clamp(-32767, 32767) as i16;
+        }
+        let first = self.times[self.cursor];
+        let last = self.times[(self.cursor + WINDOW_SAMPLES - 1) % WINDOW_SAMPLES];
+        let span_ms = u32::from(last.wrapping_sub(first));
+        // A zero/invalid time span must never yield a plausible rate.
+        if span_ms == 0 {
+            return None;
+        }
+        // Hann-windowed Goertzel bank at 1 BPM grid spacing. Grid spacing is
+        // not an accuracy claim. A broader 20..280 range lets out-of-policy
+        // dominant signals be rejected instead of reporting a subharmonic.
+        let mut windowed = [0i16; WINDOW_SAMPLES];
+        for i in 0..WINDOW_SAMPLES {
+            windowed[i] = (i32::from(wave[i]) * i32::from(HANN[i]) / 32767) as i16;
+        }
+        let mut total = 0u64;
+        let mut peak_energy = 0u64;
+        let mut peak_bpm = 0u32;
+        for (index, coefficient) in COEFFICIENTS.iter().enumerate() {
+            let energy = Self::frequency_energy(&windowed, *coefficient);
+            total += energy;
+            if energy > peak_energy {
+                peak_energy = energy;
+                peak_bpm = index as u32 + 20;
+            }
+        }
+        if peak_energy == 0 || peak_energy * (COEFFICIENTS.len() as u64) < total * 3 {
+            return None;
+        }
+        // Reject competing frequency peaks rather than choosing a rate from
+        // an ambiguous waveform. No stored spectrum or heap allocation.
+        for (index, coefficient) in COEFFICIENTS.iter().enumerate().step_by(3) {
+            let bpm = index as u32 + 20;
+            if bpm.abs_diff(peak_bpm) > 15
+                && Self::frequency_energy(&windowed, *coefficient) * 5 > peak_energy * 4
+            {
+                return None;
+            }
+        }
+        let corrected_bpm =
+            (peak_bpm * (WINDOW_SAMPLES - 1) as u32 * SAMPLE_MS as u32 + span_ms / 2) / span_ms;
+        if !(30..=220).contains(&corrected_bpm)
+            || Self::similarity(&wave, (60_000 / peak_bpm) as usize) < 6500
+        {
+            return None;
+        }
+        Some(corrected_bpm as u8)
+    }
+
     pub fn sample(&mut self, ppg: u32, ambient: u32, now_ms: u64) -> Option<u8> {
-        let previous_ms = self.previous_ms;
         if ppg <= 8
             || ppg >= ADC_CLIP
             || ambient >= ADC_CLIP
-            || previous_ms.is_some_and(|at| now_ms <= at || now_ms - at > 120)
+            || self.previous_ms.is_some_and(|at| {
+                now_ms <= at || now_ms - at < SAMPLE_MS - 20 || now_ms - at > SAMPLE_MS + 20
+            })
         {
             *self = Self::new();
             return None;
         }
         self.previous_ms = Some(now_ms);
-        let start = *self.started_ms.get_or_insert(now_ms);
-        let raw = ppg.min(0x3ffff) as i32;
-        let dc = self.dc.get_or_insert(raw << 8);
-        *dc += ((raw << 8) - *dc) / 32;
-        self.smooth[self.cursor] = raw - (*dc >> 8);
-        self.cursor = (self.cursor + 1) % 3;
-        let filtered = self.smooth.iter().sum::<i32>() / 3;
-        self.waveform[self.waveform_cursor] = filtered.clamp(-32767, 32767) as i16;
-        self.waveform_cursor = (self.waveform_cursor + 1) % 200;
-        self.waveform_count = (self.waveform_count + 1).min(200);
-        self.envelope += (filtered.abs() - self.envelope) / 16;
-        let is_peak = self.previous[1] > self.previous[0]
-            && self.previous[1] >= filtered
-            && self.previous[1] > self.envelope.max(8);
-        self.previous = [self.previous[1], filtered];
-        if now_ms.saturating_sub(start) < 2000 || !is_peak {
+        self.raw[self.cursor] = ppg as u16;
+        self.times[self.cursor] = now_ms as u16;
+        self.cursor = (self.cursor + 1) % WINDOW_SAMPLES;
+        self.count = (self.count + 1).min(WINDOW_SAMPLES);
+        if self.count < WINDOW_SAMPLES || now_ms < self.next_analysis_ms {
             return None;
         }
-        let peak = previous_ms?;
-        let previous = match self.peak_ms {
-            Some(previous) => previous,
+        self.next_analysis_ms = now_ms + 1000;
+        match self.estimate() {
+            Some(bpm) => self.confirmation.candidate(bpm, now_ms),
             None => {
-                self.peak_ms = Some(peak);
-                return None;
+                self.confirmation = RateConfirmation::new();
+                None
             }
-        };
-        let elapsed = peak.checked_sub(previous)?;
-        if elapsed < 240 {
-            return None;
-        } // Allow 40 ms sampling quantization; final rate is range-checked.
-        self.peak_ms = Some(peak);
-        if elapsed > 2040 {
-            self.interval_count = 0;
-            self.confirmation = RateConfirmation::new();
-            return None;
         }
-        self.intervals.rotate_left(1);
-        self.intervals[3] = elapsed as u32;
-        self.interval_count = (self.interval_count + 1).min(4);
-        if self.interval_count < 4 {
-            return None;
-        }
-        let mut sorted = self.intervals;
-        sorted.sort_unstable();
-        let median = (sorted[1] + sorted[2]) / 2;
-        if self
-            .intervals
-            .iter()
-            .any(|v| v.abs_diff(median) > median / 5 + 40)
-        {
-            self.confirmation = RateConfirmation::new();
-            return None;
-        }
-        let bpm = (60_000 + median / 2) / median;
-        if !(30..=220).contains(&bpm)
-            || !self.periodic(((u64::from(median) + SAMPLE_MS / 2) / SAMPLE_MS) as usize)
-        {
-            self.confirmation = RateConfirmation::new();
-            return None;
-        }
-        self.confirmation.candidate(bpm as u8, now_ms)
     }
 }

@@ -3,7 +3,7 @@
 use embedded_hal_async::i2c::I2c;
 
 const ADDRESS: u8 = 0x44;
-const ENABLE_OFF: u8 = 0x60; // 12.5 ms wait, HEN=0, 12.5 mA drive selection.
+const ENABLE_OFF: u8 = 0x50; // 50 ms wait, HEN=0, 12.5 mA drive selection.
 const DRIVER_ON: u8 = 0x2f; // Oscillator on; PineTime's steady-drive low nibble.
 
 #[derive(Debug, PartialEq, Eq)]
@@ -85,13 +85,13 @@ impl<I: I2c> Hrs3300<I> {
         }
         self.running = false;
         self.write(0x01, ENABLE_OFF).await?;
-        self.write(0x16, 0x66).await?; // Recommended 14-bit resolution baseline.
-        self.set_gain(1).await?; // Start low; the owner may calibrate analog gain.
+        self.write(0x16, 0x77).await?; // PineTime reference: 15-bit conversion.
+        self.set_gain(1).await?; // Fixed reference gain; no automatic escalation.
         self.write(0x0c, DRIVER_ON).await?;
         self.write(0x01, ENABLE_OFF | 0x80).await?;
         self.check(0x01, 0xf8, ENABLE_OFF | 0x80).await?;
         self.check(0x0c, 0x60, 0x20).await?;
-        self.check(0x16, 0x0f, 0x06).await?; // Do not require reserved bits to read back.
+        self.check(0x16, 0x0f, 0x07).await?; // Do not require reserved bits to read back.
         self.check(0x17, 0x1c, 0).await?;
         self.running = true;
         Ok(())

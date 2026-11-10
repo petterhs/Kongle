@@ -1,4 +1,4 @@
-use crate::heart_rate::{Estimator, Phase, Reading, State, MAX_MEASUREMENT_MS};
+use crate::heart_rate::{Estimator, Phase, Reading, State, MAX_MEASUREMENT_MS, SAMPLE_MS};
 
 #[test]
 fn isolated_candidates_and_rate_jumps_need_sustained_confirmation() {
@@ -30,7 +30,7 @@ fn short_periodic_bursts_are_not_published_as_stable_pulse() {
     for bpm in [130, 188, 214] {
         let mut estimator = Estimator::new();
         for index in 0..750 {
-            let now = index * 40;
+            let now = index * SAMPLE_MS;
             let wave = if now < 4800 {
                 200.0 * (now as f64 * f64::from(bpm) / 60000.0 * std::f64::consts::TAU).sin()
             } else {
@@ -42,23 +42,76 @@ fn short_periodic_bursts_are_not_published_as_stable_pulse() {
 }
 
 #[test]
-fn analog_gain_calibration_handles_observed_weak_signal_and_retains_headroom() {
-    use crate::heart_rate::target_gain;
-    for (gain, min, max, expected) in [
-        (1, 860, 864, 2),
-        (2, 1720, 1728, 4),
-        (4, 3440, 3456, 8),
-        (8, 6880, 6912, 8),
-        (8, 12000, 15000, 4),
-        (4, 6000, 7500, 4), // After reducing gain, do not bounce back up.
-        (1, 12000, 16383, 1),
-        (2, 5500, 5600, 2),
-        (8, 0, 0, 8), // No x64 fallback for darkness.
-        (1, 864, 860, 1),
-        (64, 860, 864, 64),
-    ] {
-        assert_eq!(target_gain(gain, min, max), expected);
+fn out_of_range_signals_are_not_reported_as_their_in_range_subharmonics() {
+    for bpm in [20, 240, 260] {
+        let mut estimator = Estimator::new();
+        for index in 0..450 {
+            let now = index * SAMPLE_MS;
+            let raw = (7000.0
+                + 200.0 * (now as f64 * f64::from(bpm) / 60000.0 * std::f64::consts::TAU).sin())
+                as u32;
+            assert_eq!(
+                estimator.sample(raw, 6, now),
+                None,
+                "{} BPM at {} ms",
+                bpm,
+                now
+            );
+        }
     }
+}
+
+#[test]
+fn competing_frequency_peaks_are_rejected_instead_of_selecting_a_harmonic() {
+    let mut estimator = Estimator::new();
+    for index in 0..450 {
+        let now = index * SAMPLE_MS;
+        let phase = now as f64 * 72.0 / 60000.0 * std::f64::consts::TAU;
+        let raw = (7000.0 + 200.0 * phase.sin() + 200.0 * (phase * 2.0).sin()) as u32;
+        assert_eq!(estimator.sample(raw, 6, now), None);
+    }
+}
+
+#[test]
+fn reference_adc_range_timestamp_wrap_and_missing_samples_are_handled() {
+    let mut estimator = Estimator::new();
+    let mut readings = Vec::new();
+    // Above the old 14-bit clipping boundary, crossing the u16 timestamp wrap.
+    for index in 0..300 {
+        let now = 65000 + index * SAMPLE_MS;
+        let phase = now as f64 * 72.0 / 60000.0 * std::f64::consts::TAU;
+        if let Some(bpm) = estimator.sample((24000.0 + 200.0 * phase.sin()) as u32, 6, now) {
+            readings.push(bpm);
+        }
+    }
+    assert!(readings.len() > 5);
+    assert!(readings.iter().all(|bpm| (70..=74).contains(bpm)));
+    let gap_at = 65000 + 301 * SAMPLE_MS;
+    assert_eq!(estimator.sample(24000, 6, gap_at), None);
+    for index in 1..80 {
+        let now = gap_at + index * SAMPLE_MS;
+        let phase = now as f64 * 72.0 / 60000.0 * std::f64::consts::TAU;
+        assert_eq!(
+            estimator.sample((24000.0 + 200.0 * phase.sin()) as u32, 6, now),
+            None
+        );
+    }
+    assert_eq!(estimator.sample(0x7fff, 6, gap_at + 80 * SAMPLE_MS), None);
+}
+
+#[test]
+fn large_legal_adc_waveforms_do_not_overflow_frequency_energy() {
+    let mut estimator = Estimator::new();
+    let mut readings = Vec::new();
+    for index in 0..450 {
+        let now = index * SAMPLE_MS;
+        let phase = now as f64 * 72.0 / 60000.0 * std::f64::consts::TAU;
+        if let Some(bpm) = estimator.sample((16376.0 + 16000.0 * phase.sin()) as u32, 6, now) {
+            readings.push(bpm);
+        }
+    }
+    assert!(readings.len() > 5);
+    assert!(readings.iter().all(|bpm| (70..=74).contains(bpm)));
 }
 
 #[test]
@@ -67,7 +120,7 @@ fn analog_amplification_before_quantization_can_recover_a_weak_periodic_signal()
         let mut estimator = Estimator::new();
         let mut readings = Vec::new();
         for index in 0..1000 {
-            let now = index * 40;
+            let now = index * SAMPLE_MS;
             let phase = now as f64 * 72.0 / 60000.0 * std::f64::consts::TAU;
             // Model analog amplification before ADC quantization, not digital
             // multiplication of already quantized sensor samples.
@@ -95,7 +148,7 @@ fn synthetic_periodic_signals_have_consistent_rate_without_invented_startup_bpm(
         let mut estimator = Estimator::new();
         let mut results = Vec::new();
         for sample in 0..750 {
-            let now = sample * 40;
+            let now = sample * SAMPLE_MS;
             let phase = now as f64 / 60000.0 * f64::from(bpm) * std::f64::consts::TAU;
             let raw = (12000.0 + phase.sin() * 200.0) as u32;
             if let Some(found) = estimator.sample(raw, 10, now) {
@@ -124,10 +177,10 @@ fn synthetic_periodic_signals_have_consistent_rate_without_invented_startup_bpm(
 
 #[test]
 fn flat_dark_saturated_and_seeded_random_signals_do_not_become_pulse() {
-    for raw in [0, 1, 10000, 0x3fff, 0x3ffff] {
+    for raw in [0, 1, 10000, 0x7fff, 0x3ffff] {
         let mut estimator = Estimator::new();
         for i in 0..750 {
-            assert_eq!(estimator.sample(raw, 10, i * 40), None);
+            assert_eq!(estimator.sample(raw, 10, i * SAMPLE_MS), None);
         }
     }
     let mut estimator = Estimator::new();
@@ -135,7 +188,12 @@ fn flat_dark_saturated_and_seeded_random_signals_do_not_become_pulse() {
     for i in 0..1500 {
         random = random.wrapping_mul(1664525).wrapping_add(1013904223);
         let raw = 10000 + random % 1000;
-        assert_eq!(estimator.sample(raw, 10, i * 40), None, "noise at {}", i);
+        assert_eq!(
+            estimator.sample(raw, 10, i * SAMPLE_MS),
+            None,
+            "noise at {}",
+            i
+        );
     }
 }
 
@@ -146,7 +204,7 @@ fn pulse_shaped_waveforms_with_slow_adc_updates_and_drift_are_not_just_sine_test
             let mut estimator = Estimator::new();
             let mut readings = Vec::new();
             for index in 0..1000 {
-                let now = index * 40;
+                let now = index * SAMPLE_MS;
                 let conversion = now / conversion_ms * conversion_ms;
                 let phase = (conversion as f64 * f64::from(bpm) / 60000.0).fract();
                 let primary = (-((phase - 0.15) / 0.08).powi(2)).exp();
@@ -214,13 +272,17 @@ fn stale_previous_session_and_fault_readings_are_not_valid_measurements() {
 fn timing_gaps_clear_estimator_history_instead_of_compressing_beats() {
     let mut estimator = Estimator::new();
     for i in 0..500 {
-        let raw = (12000.0 + (i as f64 * 0.04 * std::f64::consts::TAU).sin() * 200.0) as u32;
-        estimator.sample(raw, 10, i * 40);
+        let raw = (12000.0
+            + (i as f64 * SAMPLE_MS as f64 / 1000.0 * std::f64::consts::TAU).sin() * 200.0)
+            as u32;
+        estimator.sample(raw, 10, i * SAMPLE_MS);
     }
-    assert_eq!(estimator.sample(12000, 10, 25000), None);
-    for i in 1..60 {
-        let raw = (12000.0 + (i as f64 * 0.04 * std::f64::consts::TAU).sin() * 200.0) as u32;
-        assert_eq!(estimator.sample(raw, 10, 25000 + i * 40), None);
+    assert_eq!(estimator.sample(12000, 10, 75000), None);
+    for i in 1..20 {
+        let raw = (12000.0
+            + (i as f64 * SAMPLE_MS as f64 / 1000.0 * std::f64::consts::TAU).sin() * 200.0)
+            as u32;
+        assert_eq!(estimator.sample(raw, 10, 75000 + i * SAMPLE_MS), None);
     }
 }
 
@@ -229,7 +291,7 @@ fn scheduled_jitter_uses_real_beat_times_and_diagnostics_have_a_versioned_layout
     let mut estimator = Estimator::new();
     let mut readings = Vec::new();
     for index in 0..750 {
-        let now = index * 40 + if index % 10 == 0 { 20 } else { 0 };
+        let now = index * SAMPLE_MS + if index % 10 == 0 { 20 } else { 0 };
         let raw = (12000.0 + (now as f64 / 1000.0 * std::f64::consts::TAU).sin() * 200.0) as u32;
         if let Some(bpm) = estimator.sample(raw, 10, now) {
             readings.push(bpm);
@@ -380,7 +442,9 @@ mod transport {
         assert_eq!(run(sensor.sample()), Err(Error::NotRunning));
         run(sensor.start()).unwrap();
         assert_eq!(registers.borrow().values[0x0c] & 0x60, 0x20);
-        assert_eq!(registers.borrow().values[1] & 0x88, 0x80);
+        assert_eq!(registers.borrow().values[1], 0xd0);
+        assert_eq!(registers.borrow().values[0x16], 0x77);
+        assert_eq!(registers.borrow().values[0x17], 0);
         assert!(run(sensor.sample()).is_ok());
         run(sensor.stop()).unwrap();
         assert_eq!(registers.borrow().values[0x0c], 0);
@@ -431,7 +495,7 @@ mod transport {
             registers.borrow_mut().writes.clear();
             registers.borrow_mut().fail_write = Some(failed);
             assert_eq!(run(sensor.stop()), Err(Error::Bus(Fault)));
-            assert_eq!(registers.borrow().writes, vec![(0x0c, 0), (1, 0x60)]);
+            assert_eq!(registers.borrow().writes, vec![(0x0c, 0), (1, 0x50)]);
             assert_eq!(run(sensor.sample()), Err(Error::NotRunning));
         }
     }

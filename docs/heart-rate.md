@@ -36,46 +36,55 @@ configuration readback and attempts both shutdown writes even if one fails.
 The existing Rust hrs3300 crate uses blocking embedded-hal 0.2; the watch uses
 a small transport compatible with the shared bus instead of adding that stack.
 
-Initial settings are gain x1, resolution 0x66, wait 12.5 ms and the lowest LED
-drive selection (12.5 mA pulse current, not average watch current). PDRIVER's
-low nibble uses the steady-drive setting documented in the PineTime
-[reference driver](https://github.com/InfiniTimeOrg/InfiniTime/blob/main/src/drivers/Hrs3300.cpp).
-During the first eight seconds, one-second windows can raise analog gain through
-x2/x4/x8 for a weak signal. Windows require at least 20 settled samples. Gain
-is reduced if PPG reaches 12000 to leave ADC headroom; separate upward/downward
-thresholds avoid oscillation. Each change discards estimator history and waits
-200 ms before processing new samples. At most six changes are allowed, and the
-original 45-second deadline never moves. LED current and resolution stay fixed;
-x64 is not used. This is a hardware starting point, not a calibrated configuration. No upstream
-GPL/LGPL pulse-processing code is incorporated. Physical conversion timing,
-gain/drive suitability and raw waveform quality still need measurement.
+The current reference-acquisition experiment uses fixed gain x1, resolution
+0x77 (15-bit), conversion wait 50 ms (ENABLE baseline 0x50), and the lowest LED
+drive selection (12.5 mA pulse current, not average watch current). PDRIVER is
+0x2f, as documented in the PineTime
+[reference driver](https://github.com/InfiniTimeOrg/InfiniTime/blob/9ad16304f5fd526b781a760cf1313813d232645e/src/drivers/Hrs3300.cpp).
+Automatic gain changes are removed from acquisition for this experiment. The
+hardware controls remain available in the driver, but are not adjusted while
+measuring. Sensor gain/resolution and actual optical quality need physical
+validation. The normal 45-second limit and verified shutdown are unchanged.
 
-The owner requests samples at 40 ms intervals and uses actual monotonic times.
-It does not replay missed samples in a catch-up burst. PPG processing uses an
-integer DC estimate, three-sample smoothing, an adaptive amplitude threshold,
-four consistent beat intervals and delayed waveform similarity over a bounded
-eight-second buffer. At least six seconds of waveform and four qualifying rate
-candidates spanning at least three seconds are required before publishing.
-Candidates must remain within 10% (minimum allowance 6 BPM) of their first rate;
-an inconsistent waveform, large rate change or candidate gap resets confirmation.
-Gain changes reset all signal history. Flat/dark/clipped signals, large timing gaps and unstable
-intervals are rejected. Rates are restricted to 30–220 BPM. Periodic motion can
-still mimic a pulse: these are experimental estimates, not medical measurements.
-Synthetic tests are regression checks, not validation on people or movement.
-Tests also exercise pulse-shaped waveforms with a reflected secondary peak,
-slow baseline drift, small noise and ADC updates held for 40/75/100 ms. These
-cases pass, but do not establish the actual device's signal range or quality.
+The owner requests samples every 100 ms (10 Hz), ignores the first 200 ms for
+processing, and does not replay missed samples in a catch-up burst. Processing
+uses an independent integer implementation: 80 raw samples (eight seconds),
+least-squares baseline detrending, a Hann window and a Goertzel frequency bank
+on a 1 BPM grid from 20 to 280 BPM. Grid spacing is not measurement accuracy.
+Fixed mathematical coefficients are generated from the formulas documented in
+`src/heart_rate_coefficients.rs`; no upstream DSP implementation/tables or new
+DSP dependencies are incorporated. The broader search allows a dominant 240
+BPM signal to be rejected rather than reporting a 120 BPM subharmonic.
+
+Every second, a candidate must pass spectral concentration, rejection of
+competing peaks and normalized delayed waveform similarity. Every two-second
+quarter of the window must have at least 16 raw ADC levels of variation, so an
+old pulse burst cannot keep producing fresh results after the signal goes flat.
+Four consistent candidates spanning at least three seconds are required before
+publishing: the first reading can arrive after approximately eleven seconds.
+The allowed candidate change remains 10% (minimum 6 BPM). Actual window duration
+corrects the nominal period; samples outside the 80–120 ms spacing band reset
+history. Timestamp wrapping is supported. Rates remain restricted to 30–220 BPM;
+15-bit clipping bounds track the changed resolution. Analysis taking at least
+10 ms is logged over RTT to make CPU/scheduling cost visible in hardware tests.
+
+Flat/dark/clipped signals, large timing gaps, ambiguity and unstable rates are
+rejected. Periodic motion can still mimic a pulse: these are experimental
+estimates, not medical measurements. Synthetic tests cover 30–220 BPM, pulse
+shapes with secondary peaks, drift/noise, ADC update timing, competing peaks,
+out-of-range fundamentals, short bursts, missing samples and timestamp wrap.
+These checks do not establish operation or accuracy on a person. Real optical
+traces remain the next release gate; do not claim a finished HR feature.
 
 The first closed-watch test started acquisition with a blinking green LED but
 ended in No clear signal / No reading yet. Its version-1 diagnostic was
 `01-01-00-00-70-02-5D-03-00-00-06-00-00-00-5C-03-60-03-BA-02`:
 624 samples, no reported transport error, latest PPG 861, ambient 6,
 reporting-window range 860–864, sample age 698 ms. That window is far below
-clipping but below the estimator's minimum pulse amplitude. Bounded analog gain
-calibration addresses this hypothesis without relaxing pulse-quality checks.
-It still requires another physical test: weak optical coupling or absence of a
-detectable pulse cannot be fixed by amplifying noise. The configured 14-bit
-clipping boundary remains an assumption to validate against real waveforms.
+clipping but below the old estimator's minimum pulse amplitude. An earlier
+bounded gain-calibration experiment then produced the unstable results below.
+The current build instead uses reference acquisition with fixed x1 gain;
+weak optical coupling cannot be fixed by merely amplifying noise.
 
 The second closed-watch test after gain calibration produced isolated values
 130/88, 188 and 214 BPM reported as too high, with no values visible in Furu.
@@ -206,3 +215,22 @@ this investigation resumed; the diagnostic APK was copied there now. Continue
 on local branches `feature/heart-rate` (`/tmp/kongle-sensors`) and
 `feature/kongle-heart-rate` (`/tmp/furu-steps`); this investigation changes docs
 only. Next development/testing can resume after the usage quota resets.
+
+## Reference-acquisition experiment ready for testing
+
+The source comparison above describes earlier Kongle builds where stated.
+Current changes implement the 15-bit/50 ms/x1 sensor setup and 100 ms host
+sampling. Host tests showed that merely changing time constants in the old
+peak detector lost high-rate/held-ADC readings, so it was replaced with the
+independent windowed frequency analysis described above. Regression checks
+also caught an old-burst freshness problem; per-quarter signal checks now
+reject it. The LED current was not raised. No Furu change is required beyond
+`furu-heart-rate-diagnostics-dev.apk` already in the synchronized test folder.
+
+Test the newly named reference OTA ZIP in `/home/s27731/sync-phone-apps`.
+Leave the watch trial unconfirmed during hardware validation. First try a
+complete still measurement in Furu. Whether or not a BPM appears, capture the
+custom diagnostic stream in nRF Connect for a complete still measurement,
+as described above, and retain its log for waveform analysis. This is the
+first physical test of the reference setup and new estimator, not a validated
+accuracy improvement. Do not tune thresholds further without examining data.
