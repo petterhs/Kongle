@@ -13,6 +13,7 @@ pub enum Page {
     Activity,
     Media,
     Preferences,
+    HeartRate,
 }
 
 /// Clock -> settings -> system -> details. This keeps
@@ -100,6 +101,13 @@ impl Navigation {
                     y: 156..=201,
                 },
             ) => self.open(Page::Activity),
+            (
+                Page::Clock,
+                TouchEvent::Tap {
+                    x: 120..=239,
+                    y: 156..=201,
+                },
+            ) => self.open(Page::HeartRate),
             (Page::Settings, event) if layout::tapped(event, layout::DISPLAY) => {
                 self.open(Page::Preferences)
             }
@@ -121,6 +129,8 @@ impl Navigation {
             | (Page::Home, TouchEvent::SwipeDown)
             | (Page::Activity, TouchEvent::SwipeRight)
             | (Page::Activity, TouchEvent::SwipeDown)
+            | (Page::HeartRate, TouchEvent::SwipeRight)
+            | (Page::HeartRate, TouchEvent::SwipeDown)
             | (Page::Media, TouchEvent::SwipeRight)
             | (Page::Media, TouchEvent::SwipeDown)
             | (Page::Preferences, TouchEvent::SwipeRight)

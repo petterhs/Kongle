@@ -4,6 +4,10 @@
 mod ble_identity;
 #[path = "../../../src/button_gestures.rs"]
 mod button_gestures;
+#[path = "../../../src/heart_rate.rs"]
+mod heart_rate;
+#[path = "../../../src/hrs3300.rs"]
+mod hrs3300;
 #[path = "../../../src/ui/language.rs"]
 mod language;
 #[path = "../../../src/media.rs"]
@@ -63,6 +67,8 @@ mod ota;
 #[path = "../../../src/touch.rs"]
 mod touch;
 
+#[cfg(test)]
+mod heart_tests;
 #[cfg(test)]
 mod motion_tests;
 #[cfg(test)]

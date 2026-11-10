@@ -16,3 +16,4 @@ pub const HEADING: Rgb565 = rgb(0xcb, 0xa6, 0xf7); // Mauve
 pub const CLOCK: Rgb565 = HEADING;
 pub const STEPS: Rgb565 = rgb(0xa6, 0xe3, 0xa1); // Green
 pub const ERROR: Rgb565 = rgb(0xf3, 0x8b, 0xa8);
+pub const HEART: Rgb565 = rgb(0xf3, 0x8b, 0xa8);

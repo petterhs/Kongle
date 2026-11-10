@@ -46,6 +46,17 @@ struct Server {
     battery_history: BatteryHistoryService,
     music: MusicService,
     motion: MotionService,
+    heart_rate: HeartRateService,
+}
+
+#[gatt_service(uuid = "0000180d-0000-1000-8000-00805f9b34fb")]
+struct HeartRateService {
+    #[characteristic(uuid = "00002a37-0000-1000-8000-00805f9b34fb", read, notify)]
+    measurement: [u8; 2],
+    #[characteristic(uuid = "00002a38-0000-1000-8000-00805f9b34fb", read, value = 2)]
+    location: u8,
+    #[characteristic(uuid = "6b6f180d-1886-4b40-ae7d-00a11ce50001", read)]
+    diagnostics: [u8; 20],
 }
 
 /// InfiniTime step-count field, u32 little-endian. Daily total is valid only
@@ -356,6 +367,45 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                         let mut dfu_reply = None;
                         let error = match &event {
                             GattEvent::Read(read)
+                                if read.handle() == server.heart_rate.diagnostics.handle =>
+                            {
+                                let state = crate::HEART_STATE
+                                    .try_get()
+                                    .unwrap_or(crate::heart_rate::State::EMPTY);
+                                let diagnostics = crate::HEART_DIAGNOSTICS
+                                    .try_get()
+                                    .unwrap_or(crate::heart_rate::Diagnostics::EMPTY);
+                                if server
+                                    .set(
+                                        &server.heart_rate.diagnostics,
+                                        &diagnostics.encode(state, Instant::now().as_millis()),
+                                    )
+                                    .is_err()
+                                {
+                                    Some(AttErrorCode::UNLIKELY_ERROR)
+                                } else {
+                                    None
+                                }
+                            }
+                            GattEvent::Read(read)
+                                if read.handle() == server.heart_rate.measurement.handle =>
+                            {
+                                let state = crate::HEART_STATE
+                                    .try_get()
+                                    .unwrap_or(crate::heart_rate::State::EMPTY);
+                                if server
+                                    .set(
+                                        &server.heart_rate.measurement,
+                                        &state.measurement(Instant::now().as_millis()),
+                                    )
+                                    .is_err()
+                                {
+                                    Some(AttErrorCode::UNLIKELY_ERROR)
+                                } else {
+                                    None
+                                }
+                            }
+                            GattEvent::Read(read)
                                 if read.handle() == server.motion.steps.handle =>
                             {
                                 let date = crate::STEP_DATE.try_get().flatten();
@@ -552,7 +602,7 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
             publish_battery(server, battery_rx.changed().await);
         }
     });
-    let _ = embassy_futures::select::select(gatt_time_battery, async {
+    let gatt_and_media = embassy_futures::select::select(gatt_time_battery, async {
         loop {
             let request = crate::MEDIA_COMMANDS.receive().await;
             if request.session != media_session {
@@ -567,6 +617,14 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
             {
                 defmt::warn!("[media] event not delivered");
             }
+        }
+    });
+    let _ = embassy_futures::select::select(gatt_and_media, async {
+        let mut hr_rx = crate::HEART_STATE.receiver().unwrap();
+        loop {
+            let state = hr_rx.changed().await;
+            let payload = state.measurement(Instant::now().as_millis());
+            let _ = server.heart_rate.measurement.notify(conn, &payload).await;
         }
     })
     .await;
