@@ -40,7 +40,21 @@ pub enum Error<E> {
     Bus(E),
     UnknownChip(u8),
     InitializationStatus(u8),
-    Readback,
+    FeatureAddress {
+        words: u16,
+    },
+    FeatureReadback {
+        start: u16,
+        config_id: u16,
+        expected: [u8; 2],
+        actual: [u8; 2],
+    },
+    RegisterReadback {
+        register: u8,
+        mask: u8,
+        expected: u8,
+        actual: u8,
+    },
     NotInitialized,
 }
 
@@ -102,6 +116,24 @@ impl<I: I2c, D: DelayNs> Motion<I, D> {
         self.write(0x5c, &[(words >> 4) as u8]).await
     }
 
+    async fn check_register(
+        &mut self,
+        register: u8,
+        mask: u8,
+        expected: u8,
+    ) -> Result<(), Error<I::Error>> {
+        let actual = self.byte(register).await?;
+        if actual & mask != expected {
+            return Err(Error::RegisterReadback {
+                register,
+                mask,
+                expected,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
     /// Baseline: 100 Hz, ±2g, average 4, CIC mode; not a tuned accuracy claim.
     /// Caller must bound the whole operation with a timeout and keep sensor
     /// resets separate from touch. No soft-reset command is sent here.
@@ -127,13 +159,19 @@ impl<I: I2c, D: DelayNs> Motion<I, D> {
         if status != 1 {
             return Err(Error::InitializationStatus(status));
         }
+        // Match Bosch bma4_write_config_file: restore APS before fetching the
+        // ASIC's feature-window pointer. Then leave APS again for feature RAM
+        // access, as bma4_read_regs/bma4_write_regs do. Leaving it disabled
+        // across this handoff is not the vendor initialization sequence.
+        self.write(0x7c, &[power_conf | 0x01]).await?;
         // ASIC publishes its feature start pointer after configuration load.
         let low = self.byte(0x5b).await? & 0x0f;
         let high = self.byte(0x5c).await?;
         let start = u16::from(low) | (u16::from(high) << 4);
         if start + (FEATURE_LEN / 2) as u16 > 0x1000 {
-            return Err(Error::Readback);
+            return Err(Error::FeatureAddress { words: start });
         }
+        self.write(0x7c, &[power_conf & !0x01]).await?;
         let mut features = [0; FEATURE_LEN];
         for (index, chunk) in features.chunks_mut(CHUNK).enumerate() {
             self.pointer(start + (index * CHUNK / 2) as u16).await?;
@@ -151,20 +189,22 @@ impl<I: I2c, D: DelayNs> Motion<I, D> {
         let mut enabled = [0; 2];
         self.read(0x5e, &mut enabled).await?;
         if enabled != features[0x3a..0x3c] {
-            return Err(Error::Readback);
+            return Err(Error::FeatureReadback {
+                start,
+                config_id,
+                expected: [features[0x3a], features[0x3b]],
+                actual: enabled,
+            });
         }
         self.pointer(start).await?;
         self.write(0x40, &[0x28]).await?;
         self.write(0x41, &[0]).await?;
         self.write(0x7c, &[power_conf | 0x01]).await?;
         self.write(0x7d, &[power | 0x04]).await?;
-        if self.byte(0x40).await? != 0x28
-            || self.byte(0x41).await? & 3 != 0
-            || self.byte(0x7d).await? & 4 == 0
-            || self.byte(0x7c).await? & 1 == 0
-        {
-            return Err(Error::Readback);
-        }
+        self.check_register(0x40, 0xff, 0x28).await?;
+        self.check_register(0x41, 0x03, 0).await?;
+        self.check_register(0x7d, 0x04, 0x04).await?;
+        self.check_register(0x7c, 0x01, 0x01).await?;
         self.ready = true;
         Ok(Configuration {
             variant,

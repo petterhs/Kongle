@@ -28,9 +28,11 @@ struct Sensor {
     uploaded: Vec<u8>,
     feature_pointer: usize,
     loaded: bool,
+    feature_pointer_published: bool,
     writes: usize,
     fail_upload: bool,
     corrupt_enable: bool,
+    corrupt_register: Option<(u8, u8)>,
 }
 impl Sensor {
     fn new(id: u8) -> Self {
@@ -46,9 +48,11 @@ impl Sensor {
             uploaded: Vec::new(),
             feature_pointer: 0,
             loaded: false,
+            feature_pointer_published: false,
             writes: 0,
             fail_upload: false,
             corrupt_enable: false,
+            corrupt_register: None,
         }
     }
     fn pointer(&self) -> usize {
@@ -75,10 +79,14 @@ impl Sensor {
             self.registers[reg..reg + data.len()].copy_from_slice(data);
             if reg == 0x59 && data == [1] {
                 self.loaded = true;
-                // A nonzero pointer ensures driver does not assume address 0.
+                self.feature_pointer = 0x406;
+            }
+            // Exercise the vendor's APS handoff rather than assuming INIT_CTRL
+            // immediately replaces the upload address with the feature pointer.
+            if reg == 0x7c && data[0] & 1 != 0 && self.loaded && !self.feature_pointer_published {
                 self.registers[0x5b] = 3;
                 self.registers[0x5c] = 0x20;
-                self.feature_pointer = self.pointer();
+                self.feature_pointer_published = true;
             }
         }
         Ok(())
@@ -96,6 +104,13 @@ impl Sensor {
             }
         } else {
             bytes.copy_from_slice(&self.registers[reg..reg + bytes.len()]);
+            if self.loaded {
+                if let Some((register, value)) = self.corrupt_register {
+                    if reg == usize::from(register) {
+                        bytes[0] = value;
+                    }
+                }
+            }
         }
     }
 }
@@ -213,9 +228,43 @@ fn failed_upload_or_bad_asic_status_never_enables_acceleration() {
 fn feature_readback_mismatch_is_not_reported_as_ready() {
     let (mut driver, sensor) = fixture(0x13);
     sensor.borrow_mut().corrupt_enable = true;
-    assert_eq!(run(driver.initialize()), Err(Error::Readback));
+    assert_eq!(
+        run(driver.initialize()),
+        Err(Error::FeatureReadback {
+            start: 0x203,
+            config_id: 0x1234,
+            expected: [0, 0x10],
+            actual: [0, 0],
+        })
+    );
     assert_eq!(sensor.borrow().registers[0x7d] & 4, 0);
     assert_eq!(run(driver.counter()), Err(Error::NotInitialized));
+}
+
+#[test]
+fn each_register_readback_failure_reports_its_address_and_actual_value() {
+    for (register, mask, expected, actual) in [
+        (0x40, 0xff, 0x28, 0xa8),
+        (0x41, 0x03, 0, 1),
+        (0x7d, 0x04, 4, 0),
+        (0x7c, 0x01, 1, 0),
+    ] {
+        let (mut driver, sensor) = fixture(0x11);
+        sensor.borrow_mut().corrupt_register = Some((register, actual));
+        assert_eq!(
+            run(driver.initialize()),
+            Err(Error::RegisterReadback {
+                register,
+                mask,
+                expected,
+                actual,
+            })
+        );
+        assert_eq!(run(driver.counter()), Err(Error::NotInitialized));
+        sensor.borrow_mut().corrupt_register = None;
+        run(driver.stop()).unwrap();
+        assert_eq!(sensor.borrow().registers[0x7d] & 4, 0);
+    }
 }
 
 #[test]

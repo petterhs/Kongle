@@ -72,6 +72,15 @@ and wait for delayed/batched sensor reporting. These values are sensor totals,
 not daily counts; initialization/reboot may restart them. They are intentionally
 not exposed as daily steps through BLE yet.
 
+The first active hardware test failed with the old generic `Readback` error;
+touch continued to work. Initialization now follows Bosch's APS handoff after
+configuration loading before fetching the feature-window pointer. Whether that
+sequence difference caused the observed failure still needs hardware evidence.
+Failures now identify `FeatureAddress`, `FeatureReadback` (start pointer,
+configuration ID, expected/actual bytes) or `RegisterReadback` (register, mask,
+expected/actual value), rather than concealing which check failed. These checks
+remain strict; diagnostic detail is not a reason to accept invalid settings.
+
 The shared TWIM buffer now holds 32 bytes. Reads happen every five seconds
 awake and thirty seconds asleep, plus screen-state transitions; counting stays
 on the sensor. This polling is a baseline, not a final power optimization.
