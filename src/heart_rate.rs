@@ -7,6 +7,22 @@ pub const FRESH_MS: u64 = 30_000;
 // HRS and ALS use the driver's fixed 0x66 (14-bit) configuration.
 const ADC_CLIP: u32 = 0x3ff8;
 
+/// Bounded analog calibration with headroom and hysteresis. Do not lower the
+/// pulse-quality checks to turn a weak/noisy signal into a plausible number.
+pub fn target_gain(current: u8, min: u32, max: u32) -> u8 {
+    if min > max || ![1, 2, 4, 8].contains(&current) {
+        return current;
+    }
+    if max >= 12_000 && current > 1 {
+        return current / 2;
+    }
+    let midpoint = min + (max - min) / 2;
+    if max < 5500 && current < 8 && (midpoint < 4000 || max - min < 32) {
+        return current * 2;
+    }
+    current
+}
+
 #[derive(Clone, Copy)]
 pub struct Diagnostics {
     pub ppg: u32,
@@ -16,6 +32,7 @@ pub struct Diagnostics {
     pub samples: u16,
     pub at_ms: u64,
     pub error: u8,
+    pub gain: u8,
 }
 
 impl Diagnostics {
@@ -27,13 +44,14 @@ impl Diagnostics {
         samples: 0,
         at_ms: 0,
         error: 0,
+        gain: 1,
     };
 
-    /// Version, phase, live BPM, last error, sample count LE, PPG/ALS u32 LE,
+    /// Version, phase, live BPM, last error, gain/count LE, PPG/ALS u32 LE,
     /// one-second PPG min/max u16 LE, sample age milliseconds u16 LE.
     pub fn encode(self, state: State, now_ms: u64) -> [u8; 20] {
         let mut bytes = [0; 20];
-        bytes[0] = 1;
+        bytes[0] = 2;
         bytes[1] = match state.phase {
             Phase::Idle => 0,
             Phase::Measuring => 1,
@@ -43,7 +61,8 @@ impl Diagnostics {
         };
         bytes[2] = state.measurement(now_ms)[1];
         bytes[3] = self.error;
-        bytes[4..6].copy_from_slice(&self.samples.to_le_bytes());
+        let count_and_gain = self.samples.min(0x0fff) | (u16::from(self.gain & 15) << 12);
+        bytes[4..6].copy_from_slice(&count_and_gain.to_le_bytes());
         bytes[6..10].copy_from_slice(&self.ppg.to_le_bytes());
         bytes[10..14].copy_from_slice(&self.ambient.to_le_bytes());
         bytes[14..16].copy_from_slice(&self.min.to_le_bytes());

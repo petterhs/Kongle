@@ -480,6 +480,7 @@ fn heart_error(error: &hrs3300::Error<embassy_nrf::twim::Error>) -> u8 {
         hrs3300::Error::Bus(_) => 1,
         hrs3300::Error::WrongId(_) => 2,
         hrs3300::Error::NotRunning => 3,
+        hrs3300::Error::InvalidGain(_) => 4,
         hrs3300::Error::Readback { register, .. } => 0x80 | register,
     }
 }
@@ -547,6 +548,11 @@ async fn heart_task(bus: &'static device::i2c::Bus) {
         HEART_DIAGNOSTICS.sender().send(diagnostic);
         let mut window_min = u32::MAX;
         let mut window_max = 0u32;
+        let mut window_samples = 0u16;
+        let mut gain = 1u8;
+        let mut gain_changes = 0u8;
+        let mut gain_changed_at = state.started_ms;
+        let mut settle_until = state.started_ms + 200;
         let mut next_sample = Instant::now() + Duration::from_millis(SAMPLE_MS);
         let mut publish_at = Instant::now();
         let mut timed_out = false;
@@ -569,27 +575,71 @@ async fn heart_task(bus: &'static device::i2c::Bus) {
             }
             match sensor.sample().await {
                 Ok(sample) => {
-                    window_min = window_min.min(sample.ppg);
-                    window_max = window_max.max(sample.ppg);
                     diagnostic.ppg = sample.ppg;
                     diagnostic.ambient = sample.ambient;
+                    diagnostic.gain = gain;
                     diagnostic.samples = diagnostic.samples.saturating_add(1);
                     diagnostic.at_ms = now.as_millis();
-                    diagnostic.min = window_min.min(u32::from(u16::MAX)) as u16;
-                    diagnostic.max = window_max.min(u32::from(u16::MAX)) as u16;
-                    if let Some(bpm) = estimator.sample(sample.ppg, sample.ambient, now.as_millis())
-                    {
-                        state.last = Some(Reading {
-                            bpm,
-                            at_ms: now.as_millis(),
-                        });
-                        defmt::info!("[hr] pulse candidate: {} BPM", bpm);
+                    if now.as_millis() >= settle_until {
+                        window_min = window_min.min(sample.ppg);
+                        window_max = window_max.max(sample.ppg);
+                        window_samples = window_samples.saturating_add(1);
+                        diagnostic.min = window_min.min(u32::from(u16::MAX)) as u16;
+                        diagnostic.max = window_max.min(u32::from(u16::MAX)) as u16;
+                        if let Some(bpm) =
+                            estimator.sample(sample.ppg, sample.ambient, now.as_millis())
+                        {
+                            state.last = Some(Reading {
+                                bpm,
+                                at_ms: now.as_millis(),
+                            });
+                            defmt::info!("[hr] pulse candidate: {} BPM", bpm);
+                        }
                     }
                     if now >= publish_at {
+                        if window_samples >= 20
+                            && gain_changes < 6
+                            && now.as_millis().saturating_sub(gain_changed_at) >= 1000
+                        {
+                            let target = heart_rate::target_gain(gain, window_min, window_max);
+                            // Upward calibration is confined to warmup. Downward
+                            // correction can still protect later ADC headroom.
+                            if target != gain
+                                && (target < gain || now.as_millis() - state.started_ms <= 8000)
+                            {
+                                match sensor.set_gain(target).await {
+                                    Ok(()) => {
+                                        defmt::info!(
+                                            "[hr] gain {} -> {}; PPG window {}..{}",
+                                            gain,
+                                            target,
+                                            window_min,
+                                            window_max
+                                        );
+                                        gain = target;
+                                        gain_changes += 1;
+                                        gain_changed_at = now.as_millis();
+                                        settle_until = gain_changed_at + 200;
+                                        estimator = Estimator::new();
+                                        state.last = None;
+                                    }
+                                    Err(error) => {
+                                        diagnostic.error = heart_error(&error);
+                                        defmt::warn!(
+                                            "[hr] gain change failed: {:?}",
+                                            defmt::Debug2Format(&error)
+                                        );
+                                        failed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         sender.send(state);
                         HEART_DIAGNOSTICS.sender().send(diagnostic);
                         window_min = u32::MAX;
                         window_max = 0;
+                        window_samples = 0;
                         defmt::debug!("[hr] PPG {}, ambient {}", sample.ppg, sample.ambient);
                         publish_at = now + Duration::from_secs(1);
                     }

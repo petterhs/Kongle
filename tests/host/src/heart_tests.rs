@@ -1,6 +1,54 @@
 use crate::heart_rate::{Estimator, Phase, Reading, State, MAX_MEASUREMENT_MS};
 
 #[test]
+fn analog_gain_calibration_handles_observed_weak_signal_and_retains_headroom() {
+    use crate::heart_rate::target_gain;
+    for (gain, min, max, expected) in [
+        (1, 860, 864, 2),
+        (2, 1720, 1728, 4),
+        (4, 3440, 3456, 8),
+        (8, 6880, 6912, 8),
+        (8, 12000, 15000, 4),
+        (4, 6000, 7500, 4), // After reducing gain, do not bounce back up.
+        (1, 12000, 16383, 1),
+        (2, 5500, 5600, 2),
+        (8, 0, 0, 8), // No x64 fallback for darkness.
+        (1, 864, 860, 1),
+        (64, 860, 864, 64),
+    ] {
+        assert_eq!(target_gain(gain, min, max), expected);
+    }
+}
+
+#[test]
+fn analog_amplification_before_quantization_can_recover_a_weak_periodic_signal() {
+    for gain in [1, 8] {
+        let mut estimator = Estimator::new();
+        let mut readings = Vec::new();
+        for index in 0..1000 {
+            let now = index * 40;
+            let phase = now as f64 * 72.0 / 60000.0 * std::f64::consts::TAU;
+            // Model analog amplification before ADC quantization, not digital
+            // multiplication of already quantized sensor samples.
+            let raw = ((861.0 + 2.0 * phase.sin()) * f64::from(gain)).round() as u32;
+            if let Some(bpm) = estimator.sample(raw, 6, now) {
+                readings.push(bpm);
+            }
+        }
+        if gain == 1 {
+            assert!(readings.is_empty());
+        } else {
+            assert!(readings.len() >= 3);
+            assert!(readings
+                .iter()
+                .rev()
+                .take(5)
+                .all(|bpm| (i32::from(*bpm) - 72).abs() <= 3));
+        }
+    }
+}
+
+#[test]
 fn synthetic_periodic_signals_have_consistent_rate_without_invented_startup_bpm() {
     for bpm in [30, 40, 60, 72, 90, 120, 160, 200, 220] {
         let mut estimator = Estimator::new();
@@ -168,10 +216,13 @@ fn scheduled_jitter_uses_real_beat_times_and_diagnostics_have_a_versioned_layout
         samples: 25,
         at_ms: 1000,
         error: 0,
+        gain: 4,
     };
     let value = diag.encode(state, 1040);
-    assert_eq!(&value[..4], &[1, 1, 72, 0]);
-    assert_eq!(u16::from_le_bytes(value[4..6].try_into().unwrap()), 25);
+    assert_eq!(&value[..4], &[2, 1, 72, 0]);
+    let packed = u16::from_le_bytes(value[4..6].try_into().unwrap());
+    assert_eq!(packed & 0x0fff, 25);
+    assert_eq!(packed >> 12, 4);
     assert_eq!(u32::from_le_bytes(value[6..10].try_into().unwrap()), 12345);
     assert_eq!(u32::from_le_bytes(value[10..14].try_into().unwrap()), 678);
     assert_eq!(u16::from_le_bytes(value[14..16].try_into().unwrap()), 12000);
@@ -293,6 +344,30 @@ mod transport {
         run(sensor.stop()).unwrap();
         assert_eq!(registers.borrow().values[0x0c], 0);
         assert_eq!(registers.borrow().values[1] & 0x80, 0);
+    }
+
+    #[test]
+    fn gain_changes_only_touch_gain_register_and_reject_unsupported_values() {
+        let (mut sensor, registers) = fixture();
+        run(sensor.start()).unwrap();
+        registers.borrow_mut().writes.clear();
+        for (gain, bits) in [(1, 0), (2, 4), (4, 8), (8, 12)] {
+            run(sensor.set_gain(gain)).unwrap();
+            assert_eq!(registers.borrow().values[0x17], bits);
+        }
+        assert_eq!(
+            registers.borrow().writes,
+            vec![(0x17, 0), (0x17, 4), (0x17, 8), (0x17, 12)]
+        );
+        for invalid in [0, 3, 16, 64] {
+            assert_eq!(
+                run(sensor.set_gain(invalid)),
+                Err(Error::InvalidGain(invalid))
+            );
+        }
+        assert_eq!(registers.borrow().writes.len(), 4);
+        assert!(run(sensor.sample()).is_ok());
+        run(sensor.stop()).unwrap();
     }
 
     #[test]

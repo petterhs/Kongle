@@ -16,6 +16,7 @@ pub enum Error<E> {
         actual: u8,
     },
     NotRunning,
+    InvalidGain(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,7 +86,7 @@ impl<I: I2c> Hrs3300<I> {
         self.running = false;
         self.write(0x01, ENABLE_OFF).await?;
         self.write(0x16, 0x66).await?; // Recommended 14-bit resolution baseline.
-        self.write(0x17, 0).await?; // Gain x1. No automatic LED-current escalation.
+        self.set_gain(1).await?; // Start low; the owner may calibrate analog gain.
         self.write(0x0c, DRIVER_ON).await?;
         self.write(0x01, ENABLE_OFF | 0x80).await?;
         self.check(0x01, 0xf8, ENABLE_OFF | 0x80).await?;
@@ -94,6 +95,23 @@ impl<I: I2c> Hrs3300<I> {
         self.check(0x17, 0x1c, 0).await?;
         self.running = true;
         Ok(())
+    }
+
+    /// Only the modest documented gains are used; x64 is deliberately absent.
+    /// This changes analog gain, not LED current or ADC resolution.
+    pub async fn set_gain(&mut self, multiplier: u8) -> Result<(), Error<I::Error>> {
+        let bits = match multiplier {
+            1 => 0,
+            2 => 4,
+            4 => 8,
+            8 => 12,
+            _ => return Err(Error::InvalidGain(multiplier)),
+        };
+        if !self.recognized {
+            return Err(Error::NotRunning);
+        }
+        self.write(0x17, bits).await?;
+        self.check(0x17, 0x1c, bits).await
     }
 
     pub async fn sample(&mut self) -> Result<Sample, Error<I::Error>> {

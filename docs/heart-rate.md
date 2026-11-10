@@ -40,7 +40,13 @@ Initial settings are gain x1, resolution 0x66, wait 12.5 ms and the lowest LED
 drive selection (12.5 mA pulse current, not average watch current). PDRIVER's
 low nibble uses the steady-drive setting documented in the PineTime
 [reference driver](https://github.com/InfiniTimeOrg/InfiniTime/blob/main/src/drivers/Hrs3300.cpp).
-This is a hardware starting point, not a calibrated configuration. No upstream
+During the first eight seconds, one-second windows can raise analog gain through
+x2/x4/x8 for a weak signal. Windows require at least 20 settled samples. Gain
+is reduced if PPG reaches 12000 to leave ADC headroom; separate upward/downward
+thresholds avoid oscillation. Each change discards estimator history and waits
+200 ms before processing new samples. At most six changes are allowed, and the
+original 45-second deadline never moves. LED current and resolution stay fixed;
+x64 is not used. This is a hardware starting point, not a calibrated configuration. No upstream
 GPL/LGPL pulse-processing code is incorporated. Physical conversion timing,
 gain/drive suitability and raw waveform quality still need measurement.
 
@@ -57,11 +63,15 @@ slow baseline drift, small noise and ADC updates held for 40/75/100 ms. These
 cases pass, but do not establish the actual device's signal range or quality.
 
 The first closed-watch test started acquisition with a blinking green LED but
-ended in No clear signal / No reading yet. Raw BLE diagnostic values are needed
-before tuning. In particular, the current estimator assumes a 14-bit clipping
-boundary from the configured baseline; a mismatch with actual channel scaling
-would reject all samples. Do not increase LED current or relax periodicity
-checks merely to make a plausible number appear.
+ended in No clear signal / No reading yet. Its version-1 diagnostic was
+`01-01-00-00-70-02-5D-03-00-00-06-00-00-00-5C-03-60-03-BA-02`:
+624 samples, no reported transport error, latest PPG 861, ambient 6,
+reporting-window range 860–864, sample age 698 ms. That window is far below
+clipping but below the estimator's minimum pulse amplitude. Bounded analog gain
+calibration addresses this hypothesis without relaxing pulse-quality checks.
+It still requires another physical test: weak optical coupling or absence of a
+detectable pulse cannot be fixed by amplifying noise. The configured 14-bit
+clipping boundary remains an assumption to validate against real waveforms.
 
 HR transfers use a mutex-protected bounded port, rather than cancelling a DMA
 future while its sample buffer is live. Ordinary small transfers briefly block
@@ -87,11 +97,11 @@ fails on a closed watch. It does not itself start measurement or stream raw PPG.
 
 | Bytes | Value |
 | --- | --- |
-| 0 | Version 1 |
+| 0 | Version 2 (version 1 used fixed x1 gain) |
 | 1 | Phase: 0 idle, 1 measuring, 2 no signal, 3 missing, 4 fault |
 | 2 | Live BPM (0 unavailable) |
-| 3 | Last error: 0 none, 1 bus, 2 wrong ID, 3 not running, 0x80 OR register address for readback failure |
-| 4–5 | Sample count, u16 LE |
+| 3 | Last error: 0 none, 1 bus, 2 wrong ID, 3 not running, 4 invalid gain, 0x80 OR register address for readback failure |
+| 4–5 | u16 LE: low 12 bits sample count (saturated at 4095), high 4 bits gain multiplier (1/2/4/8). Version 1 used the whole u16 for count. |
 | 6–9 / 10–13 | Latest PPG / ambient, u32 LE |
 | 14–15 / 16–17 | Last reporting window PPG min / max, u16 LE (saturated) |
 | 18–19 | Sample age in ms, u16 LE (65535 if unavailable/too old) |
