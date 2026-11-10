@@ -11,6 +11,37 @@ use crate::{
 use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
 
 #[test]
+fn live_steps_only_redraw_their_region_and_never_overwrite_media() {
+    let mut ui = WatchUi::new();
+    let mut frame = Frame::new();
+    render(&mut ui, &mut frame);
+    let before = frame.pixels.clone();
+    assert!(ui.set_steps(Some(12345)));
+    ui.draw_steps(&mut frame);
+    assert_eq!(before[..169 * 240], frame.pixels[..169 * 240]);
+    assert_eq!(before[199 * 240..], frame.pixels[199 * 240..]);
+    assert_ne!(before, frame.pixels);
+    assert!(!ui.set_steps(Some(12345)));
+
+    ui.handle_touch(TouchEvent::Tap { x: 50, y: 180 });
+    render(&mut ui, &mut frame);
+    let before = frame.pixels.clone();
+    ui.set_steps(None);
+    ui.draw_steps(&mut frame);
+    assert_eq!(before[..32 * 240], frame.pixels[..32 * 240]);
+    assert_eq!(before[148 * 240..], frame.pixels[148 * 240..]);
+    assert_ne!(before, frame.pixels);
+
+    ui.open_media();
+    render(&mut ui, &mut frame);
+    let before = frame.pixels.clone();
+    ui.set_steps(Some(u32::MAX));
+    ui.draw_steps(&mut frame);
+    assert_eq!(before, frame.pixels);
+    assert_eq!(frame.clipped, 0);
+}
+
+#[test]
 fn double_press_has_a_bounded_window_and_hold_does_not_become_double() {
     let mut g = Gestures::new();
     g.press(0);

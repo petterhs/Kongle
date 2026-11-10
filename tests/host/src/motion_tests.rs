@@ -217,3 +217,16 @@ fn feature_readback_mismatch_is_not_reported_as_ready() {
     assert_eq!(sensor.borrow().registers[0x7d] & 4, 0);
     assert_eq!(run(driver.counter()), Err(Error::NotInitialized));
 }
+
+#[test]
+fn lost_engine_state_makes_counts_unavailable_and_shutdown_restores_power_save() {
+    let (mut driver, sensor) = fixture(0x11);
+    run(driver.initialize()).unwrap();
+    sensor.borrow_mut().status = 0;
+    assert_eq!(run(driver.counter()), Err(Error::InitializationStatus(0)));
+    assert_eq!(run(driver.counter()), Err(Error::NotInitialized));
+    sensor.borrow_mut().registers[0x7c] &= !1;
+    run(driver.stop()).unwrap();
+    assert_eq!(sensor.borrow().registers[0x7c] & 1, 1);
+    assert_eq!(sensor.borrow().registers[0x7d] & 4, 0);
+}

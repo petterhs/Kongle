@@ -60,6 +60,8 @@ def main() -> None:
         package.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
         package.writestr("application.bin", image)
         package.writestr("application.dat", init)
+        notice = Path(__file__).resolve().parents[1] / "src/device/bosch/LICENSE"
+        package.writestr("THIRD-PARTY-NOTICES.txt", notice.read_text())
     print(f"DFU package: {arguments.output} ({len(image)} bytes, CRC16 0x{crc:04x})")
 
 

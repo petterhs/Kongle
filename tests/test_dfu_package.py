@@ -30,6 +30,10 @@ class DfuPackageTests(unittest.TestCase):
                 capture_output=True,
             )
             with ZipFile(output) as package:
+                self.assertEqual(
+                    package.read("THIRD-PARTY-NOTICES.txt"),
+                    (ROOT / "src/device/bosch/LICENSE").read_bytes(),
+                )
                 return (
                     package.read("application.bin"),
                     package.read("application.dat"),

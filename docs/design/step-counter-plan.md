@@ -1,9 +1,10 @@
 # Step measurement for Kongle 0.4.0
 
-Status: shared I2C transport and a read-only startup probe are implemented on
-`feature/sensor-foundation`. A Rust transport for loading the matched Bosch
-configuration and reading its cumulative counter is host-tested but not yet
-enabled on hardware. Goal: reliable wrist-worn counting with low idle cost,
+Status: the maintainer's read-only dev-watch probe returned chip ID `0x11`.
+`feature/sensor-foundation` now initializes the matching Bosch engine and
+displays raw cumulative counts. This active build still needs hardware testing;
+daily totals, persistence and BLE reporting are not implemented yet.
+Goal: reliable wrist-worn counting with low idle cost,
 documented limitations and reproducible tests. Improvement over another firmware
 must be demonstrated on measured cases, not inferred from a rewritten driver.
 
@@ -49,30 +50,46 @@ reproducible source provenance rather than depending on an unverified mirror.
 Deliverable: a minimal Rust driver that initializes the identified part and
 reports a raw cumulative hardware counter, with independent transport tests.
 
-### First hardware check
+### Current hardware test
 
-The foundation build reads only register `0x00` at I2C address `0x18`, once at
-startup with a 500 ms timeout. It does not reset the sensor, upload configuration
-or turn on step counting. Capture the `[motion] read-only probe: chip ID …`
-message from RTT, then check touch/swipes, display sleep/wake and BLE together.
-A missing sensor must log an error and leave the rest of the watch usable.
-Record the returned ID before selecting a variant configuration. A successful
-read alone does not establish which configuration blob is safe to load.
+The earlier read-only probe identified the dev sensor as `0x11` at address
+`0x18`. The active build calls `Motion::initialize` with an eight-second timeout.
+It uses the unchanged 6144-byte streams for IDs 0x11/0x13 with documented hashes
+and BSD notices in `src/device/bosch/`. ASIC status, feature enable readback,
+acceleration configuration and power registers must pass before counts are
+published. Unknown chips receive no writes, including during error cleanup.
 
-The next build can call `motion::Motion::initialize` with a whole-operation
-timeout after this check. It uses verified 6144-byte streams for IDs 0x11/0x13
-with documented hashes and BSD notices in `src/device/bosch/`. It checks ASIC
-status, feature enable readback, acceleration configuration and power registers.
+Flash from `/tmp/kongle-sensors` using the normal development feature set:
+
+```sh
+KONGLE_FEATURES=mcuboot,ota-activation,touch-wake-debug bash scripts/flash_app.sh
+```
+
+Capture `[motion] ... ready; config ID ..., accel 28, range 00` followed by
+`[motion] raw steps: ...`, or the initialization error. Check touch, BLE and
+screen sleep/wake during and after initialization. Test a small counted walk
+and wait for delayed/batched sensor reporting. These values are sensor totals,
+not daily counts; initialization/reboot may restart them. They are intentionally
+not exposed as daily steps through BLE yet.
+
+The shared TWIM buffer now holds 32 bytes. Reads happen every five seconds
+awake and thirty seconds asleep, plus screen-state transitions; counting stays
+on the sensor. This polling is a baseline, not a final power optimization.
+Read errors publish unavailable rather than zero. Three consecutive errors stop
+acquisition without resetting the shared bus or touch. Initialization/read
+operations and best-effort shutdown have bounded timeouts.
+
 Transport tests exercise both variants, upload failure, bad ASIC status,
-unknown chips and feature readback failures. These establish protocol handling,
-not physical initialization or counting accuracy.
+unknown chips, feature readback failure and lost engine state. They establish
+protocol handling, not physical initialization or counting accuracy. UI tests
+check that count updates leave other regions/pages unchanged. Bosch notices
+accompany the raw MCUBoot build output and are included in the DFU ZIP.
 
-Before enabling/distributing the step engine: increase the shared TWIM transmit
-buffer to at least 17 bytes; preserve the Bosch notice in binary release
-materials; test cancellation and error cleanup without disrupting touch; and
-verify whether initialization without a soft reset works after each boot path.
-The driver deliberately sends no soft reset: the reference PineTime setup
-requires TWI recovery after that command, which needs its own hardware audit.
+Still verify cancellation/error cleanup without disrupting touch and startup
+after each boot path. The driver deliberately sends no soft reset: the reference
+PineTime setup requires TWI recovery after that command, which needs its own
+hardware audit. Do not assume successful cold initialization proves OTA/trial
+handoff behavior.
 
 ## 2. Establish a baseline before tuning
 

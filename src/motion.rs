@@ -2,8 +2,8 @@
 //!
 //! Register protocol follows Bosch's BSD-3-Clause BMA4/BMA423 API; see
 //! device/bosch/README.md and LICENSE for source revision and blob provenance.
-//! Initialization is not yet enabled in the firmware: first capture the chip ID
-//! with the read-only probe and validate the shared bus on hardware.
+//! Chip ID 0x11 was confirmed by the maintainer's read-only dev-watch probe.
+//! Raw counting is a measurement baseline, not a calibrated daily total.
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 
 const ADDRESS: u8 = 0x18;
@@ -178,6 +178,11 @@ impl<I: I2c, D: DelayNs> Motion<I, D> {
         if !self.ready {
             return Err(Error::NotInitialized);
         }
+        let status = self.byte(0x2a).await? & 0x0f;
+        if status != 1 {
+            self.ready = false;
+            return Err(Error::InitializationStatus(status));
+        }
         let mut data = [0; 4];
         self.read(0x1e, &mut data).await?;
         Ok(u32::from_le_bytes(data))
@@ -190,6 +195,8 @@ impl<I: I2c, D: DelayNs> Motion<I, D> {
             return Ok(());
         }
         let power = self.byte(0x7d).await?;
-        self.write(0x7d, &[power & !0x04]).await
+        self.write(0x7d, &[power & !0x04]).await?;
+        let power_conf = self.byte(0x7c).await?;
+        self.write(0x7c, &[power_conf | 0x01]).await
     }
 }

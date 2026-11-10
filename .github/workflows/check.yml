@@ -36,3 +36,4 @@ jobs:
             target/mcuboot/thumbv7em-none-eabihf/release/kongle
             target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/pinetime-mcuboot-app-image.bin
             target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/kongle-mcuboot-app-dfu-*.zip
+            target/mcuboot/thumbv7em-none-eabihf/release/mcuboot/THIRD-PARTY-NOTICES.txt
