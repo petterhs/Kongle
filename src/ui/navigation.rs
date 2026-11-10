@@ -1,20 +1,25 @@
 use crate::touch::TouchEvent;
+use crate::ui_layout as layout;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Clock,
-    Launcher,
+    System,
     Notifications,
     Settings,
     About,
     Firmware,
+    Home,
+    Activity,
+    Media,
+    Preferences,
 }
 
-/// At most two levels are needed for clock -> launcher -> page. This keeps
+/// Clock -> settings -> system -> details. This keeps
 /// navigation bounded and requires no allocation.
 pub struct Navigation {
     page: Page,
-    stack: [Page; 2],
+    stack: [Page; 3],
     depth: usize,
 }
 
@@ -22,7 +27,7 @@ impl Navigation {
     pub const fn new() -> Self {
         Self {
             page: Page::Clock,
-            stack: [Page::Clock; 2],
+            stack: [Page::Clock; 3],
             depth: 0,
         }
     }
@@ -51,6 +56,11 @@ impl Navigation {
         self.depth = 1;
     }
 
+    pub fn media(&mut self) {
+        self.clock();
+        self.open(Page::Media);
+    }
+
     fn open(&mut self, page: Page) -> bool {
         if self.page == page || self.depth == self.stack.len() {
             return false;
@@ -72,20 +82,50 @@ impl Navigation {
 
     pub fn handle(&mut self, event: TouchEvent) -> bool {
         match (self.page, event) {
-            (Page::Clock, TouchEvent::SwipeUp) => self.open(Page::Launcher),
+            (Page::Clock, TouchEvent::SwipeUp) => self.open(Page::Settings),
             (Page::Clock, TouchEvent::SwipeDown) => self.open(Page::Notifications),
-            (Page::Clock, TouchEvent::SwipeRight) => self.open(Page::Settings),
-            (Page::Clock, TouchEvent::SwipeLeft) => self.open(Page::About),
-            (Page::Launcher, TouchEvent::Tap { y: 70..=124, .. }) => self.open(Page::Settings),
-            (Page::Launcher, TouchEvent::Tap { y: 125..=180, .. }) => self.open(Page::About),
-            (Page::Launcher, TouchEvent::Tap { y: 181..=239, .. }) => self.open(Page::Firmware),
-            (Page::Launcher, TouchEvent::SwipeDown)
+            (Page::Clock, TouchEvent::SwipeRight) => self.open(Page::Home),
+            (Page::Clock, TouchEvent::SwipeLeft) => self.open(Page::Media),
+            (
+                Page::Clock,
+                TouchEvent::Tap {
+                    x: 104..=180,
+                    y: 0..=29,
+                },
+            ) => self.open(Page::Notifications),
+            (
+                Page::Clock,
+                TouchEvent::Tap {
+                    x: 0..=119,
+                    y: 156..=201,
+                },
+            ) => self.open(Page::Activity),
+            (Page::Settings, event) if layout::tapped(event, layout::DISPLAY) => {
+                self.open(Page::Preferences)
+            }
+            (Page::Settings, event) if layout::tapped(event, layout::SYSTEM) => {
+                self.open(Page::System)
+            }
+            (Page::System, event) if layout::tapped(event, layout::ABOUT) => self.open(Page::About),
+            (Page::System, event) if layout::tapped(event, layout::FIRMWARE) => {
+                self.open(Page::Firmware)
+            }
+            (Page::System, TouchEvent::SwipeDown)
             | (Page::Notifications, TouchEvent::SwipeUp)
+            | (Page::Notifications, TouchEvent::SwipeRight)
             | (Page::Settings, TouchEvent::SwipeLeft)
             | (Page::Settings, TouchEvent::SwipeDown)
             | (Page::About, TouchEvent::SwipeDown)
             | (Page::About, TouchEvent::SwipeRight) => self.back(),
-            (Page::Firmware, TouchEvent::SwipeDown) => self.back(),
+            (Page::Home, TouchEvent::SwipeLeft)
+            | (Page::Home, TouchEvent::SwipeDown)
+            | (Page::Activity, TouchEvent::SwipeRight)
+            | (Page::Activity, TouchEvent::SwipeDown)
+            | (Page::Media, TouchEvent::SwipeRight)
+            | (Page::Media, TouchEvent::SwipeDown)
+            | (Page::Preferences, TouchEvent::SwipeRight)
+            | (Page::Preferences, TouchEvent::SwipeDown) => self.back(),
+            (Page::Firmware, TouchEvent::SwipeDown | TouchEvent::SwipeRight) => self.back(),
             _ => false,
         }
     }

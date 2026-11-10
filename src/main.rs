@@ -8,6 +8,8 @@ mod battery_persist;
 #[cfg(feature = "battery-persist-experimental")]
 mod battery_record;
 mod ble;
+mod ble_identity;
+mod button_gestures;
 mod current_time;
 mod device;
 mod dfu;
@@ -16,10 +18,15 @@ mod firmware_confirm;
 mod firmware_state;
 mod flash;
 mod haptics;
+mod media;
 mod notifications;
 mod ota;
+#[path = "ui/theme.rs"]
+mod theme;
 mod touch;
 mod ui;
+#[path = "ui/layout.rs"]
+mod ui_layout;
 
 use core::cell::RefCell;
 use defmt_rtt as _;
@@ -103,6 +110,8 @@ static BLE_CONNECTED_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new
 static INPUT_CH: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new();
 static NOTIFICATION_CH: Channel<CriticalSectionRawMutex, notifications::Notification, 2> =
     Channel::new();
+static MEDIA_WATCH: Watch<CriticalSectionRawMutex, media::State, 2> = Watch::new();
+static MEDIA_COMMANDS: Channel<CriticalSectionRawMutex, media::Request, 4> = Channel::new();
 static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 1> = Watch::new();
 static VIBRATIONS: Channel<CriticalSectionRawMutex, haptics::Pattern, 4> = Channel::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
@@ -192,6 +201,7 @@ async fn button_task(
     // again before the bootloader's button menu can be used. Arm only after a
     // release, then require a fresh press for a long hold.
     let mut armed = !pressed;
+    let mut clicks = button_gestures::Gestures::new();
     loop {
         if pressed {
             if armed && !held_sent {
@@ -205,6 +215,7 @@ async fn button_task(
                     embassy_futures::select::Either::First(()) => {}
                     embassy_futures::select::Either::Second(()) => {
                         held_sent = true;
+                        clicks.cancel();
                         sender.send(InputEvent::ButtonHeld).await;
                         continue;
                     }
@@ -213,7 +224,24 @@ async fn button_task(
                 button.wait_for_release().await;
             }
         } else {
-            button.wait_for_press().await;
+            if let Some(deadline) = clicks.deadline() {
+                match embassy_futures::select::select(
+                    button.wait_for_press(),
+                    Timer::at(Instant::from_millis(deadline)),
+                )
+                .await
+                {
+                    embassy_futures::select::Either::First(()) => {}
+                    embassy_futures::select::Either::Second(()) => {
+                        if clicks.expire(Instant::now().as_millis()) {
+                            sender.send(InputEvent::ButtonSingleConfirmed).await;
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                button.wait_for_press().await;
+            }
         }
 
         // Sample only after an edge. Six stable readings reject button bounce
@@ -239,6 +267,7 @@ async fn button_task(
         }
         if pressed {
             pressed_since = Some(Instant::now());
+            clicks.press(Instant::now().as_millis());
             held_sent = false;
             sender.send(InputEvent::ButtonPressed).await;
         } else {
@@ -247,7 +276,11 @@ async fn button_task(
             if held_sent {
                 held_sent = false;
             } else {
-                sender.send(InputEvent::ButtonReleased).await;
+                let event = match clicks.release(Instant::now().as_millis()) {
+                    button_gestures::Click::First => InputEvent::ButtonReleased,
+                    button_gestures::Click::Double => InputEvent::ButtonDoublePressed,
+                };
+                sender.send(event).await;
             }
         }
     }
@@ -568,6 +601,7 @@ async fn main(spawner: Spawner) {
     let low = embassy_nrf::pac::FICR.deviceaddr(0).read().to_le_bytes();
     let high = embassy_nrf::pac::FICR.deviceaddr(1).read().to_le_bytes();
     let address = [low[0], low[1], low[2], low[3], high[0], high[1] | 0xc0];
+    watch_ui.set_ble_address(address);
     let copy_done =
         unsafe { core::ptr::read_volatile(ota::PRIMARY_COPY_DONE_ADDRESS as *const u8) };
     let image_ok = unsafe { core::ptr::read_volatile(ota::PRIMARY_IMAGE_OK_ADDRESS as *const u8) };
@@ -599,12 +633,14 @@ async fn main(spawner: Spawner) {
     let mut ble_rx = BLE_CONNECTED_WATCH.receiver().unwrap();
     let input_rx = INPUT_CH.receiver();
     let notification_rx = NOTIFICATION_CH.receiver();
+    let mut media_rx = MEDIA_WATCH.receiver().unwrap();
 
     let mut last_ota = UpdateStatus::Idle;
     let mut ble_connected = false;
     let mut awake = true;
     let mut sleep_at = Instant::now() + Duration::from_secs(30);
     let mut redraw = false;
+    let mut pending_button_sleep = false;
     loop {
         match embassy_futures::select::select(
             ota_rx.changed(),
@@ -616,7 +652,10 @@ async fn main(spawner: Spawner) {
                         input_rx.receive(),
                         embassy_futures::select::select(
                             ble_rx.changed(),
-                            notification_rx.receive(),
+                            embassy_futures::select::select(
+                                notification_rx.receive(),
+                                media_rx.changed(),
+                            ),
                         ),
                     ),
                 ),
@@ -625,6 +664,7 @@ async fn main(spawner: Spawner) {
         .await
         {
             embassy_futures::select::Either::First(status) => {
+                pending_button_sleep = false;
                 last_ota = status;
                 sleep_at = Instant::now() + Duration::from_secs(30);
                 if matches!(
@@ -674,12 +714,31 @@ async fn main(spawner: Spawner) {
                     event,
                 )),
             )) => {
+                if matches!(
+                    event,
+                    InputEvent::ButtonPressed | InputEvent::Touch(_) | InputEvent::TouchWake
+                ) {
+                    pending_button_sleep = false;
+                }
                 if matches!(event, InputEvent::ButtonReleased) {
-                    awake = watch_ui.handle_button(awake);
-                    if awake {
+                    pending_button_sleep = awake && watch_ui.is_clock();
+                    if !pending_button_sleep {
+                        awake = watch_ui.handle_button(awake);
                         redraw = true;
                         sleep_at = Instant::now() + Duration::from_secs(30);
                     }
+                }
+                if matches!(event, InputEvent::ButtonSingleConfirmed) && pending_button_sleep {
+                    pending_button_sleep = false;
+                    awake = false;
+                }
+                if matches!(event, InputEvent::ButtonDoublePressed) {
+                    pending_button_sleep = false;
+                    watch_ui.open_media();
+                    awake = true;
+                    redraw = true;
+                    sleep_at = Instant::now() + Duration::from_secs(30);
+                    defmt::info!("Button double press: media");
                 }
                 if matches!(event, InputEvent::TouchWake)
                     && cfg!(feature = "touch-wake-debug")
@@ -768,7 +827,9 @@ async fn main(spawner: Spawner) {
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
                 embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
-                    embassy_futures::select::Either::Second(notification),
+                    embassy_futures::select::Either::Second(
+                        embassy_futures::select::Either::First(notification),
+                    ),
                 )),
             )) => {
                 let show = !matches!(
@@ -778,15 +839,35 @@ async fn main(spawner: Spawner) {
                         | UpdateStatus::Validating
                 );
                 watch_ui.receive_notification(notification, show);
+                if awake {
+                    watch_ui.draw_notification_indicator(&mut display);
+                }
                 if watch_ui.vibration_enabled() {
                     let _ = VIBRATIONS.try_send(haptics::Pattern::Notification);
                 }
                 defmt::info!("[ans] notification stored; preview={}", show);
                 if show {
+                    pending_button_sleep = false;
                     awake = true;
                     redraw = true;
                     sleep_at = Instant::now() + Duration::from_secs(30);
                 }
+            }
+            embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
+                    embassy_futures::select::Either::Second(
+                        embassy_futures::select::Either::Second(state),
+                    ),
+                )),
+            )) => {
+                if watch_ui.set_media(state) && awake {
+                    watch_ui.draw_media(&mut display);
+                }
+            }
+        }
+        if let Some(request) = watch_ui.take_media_request() {
+            if MEDIA_COMMANDS.try_send(request).is_err() {
+                defmt::warn!("[media] command queue full");
             }
         }
         if awake

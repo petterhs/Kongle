@@ -1,8 +1,8 @@
 use display_interface::WriteOnlyDataCommand;
+use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::{
     geometry::Point, geometry::Size, mono_font::MonoFont, primitives::Rectangle,
 };
-use embedded_graphics::{pixelcolor::Rgb565, prelude::RgbColor};
 use embedded_hal::{delay::DelayNs, digital::OutputPin};
 use mipidsi::options::{ColorInversion, ColorOrder, Orientation, Rotation};
 use mipidsi::{
@@ -76,17 +76,12 @@ pub const DISPLAY_ORIENTATION: Orientation = Orientation::new().rotate(Rotation:
 pub const DISPLAY_COLOR_ORDER: ColorOrder = ColorOrder::Bgr;
 pub const DISPLAY_COLOR_INVERSION: ColorInversion = ColorInversion::Inverted;
 
-pub const BACKGROUND_COLOR: Rgb565 = Rgb565::BLACK;
-pub const TEXT_COLOR: Rgb565 = Rgb565::WHITE;
-pub const ACCENT_COLOR: Rgb565 = Rgb565::CYAN;
+pub const BACKGROUND_COLOR: Rgb565 = crate::theme::BACKGROUND;
+pub const TEXT_COLOR: Rgb565 = crate::theme::TEXT;
+pub const ACCENT_COLOR: Rgb565 = crate::theme::ACCENT;
 
 pub const TIME_POS_X: i32 = 20;
-pub const TIME_POS_Y: i32 = 35;
-
-pub const DATE_POS_X: i32 = 10;
-pub const DATE_POS_Y: i32 = 151;
-pub const DATE_CHARS: u32 = 10;
-pub const DATE_DIVIDER_Y: i32 = 122;
+pub const TIME_POS_Y: i32 = 66;
 
 pub const BATTERY_POS_Y: i32 = 18;
 pub const BATTERY_ICON_POS_X: i32 = 10;
@@ -95,15 +90,14 @@ pub const STATUS_ICON_SIZE: u32 = 24;
 pub const BATTERY_PERCENT_POS_X: i32 = 40;
 pub const BATTERY_CHARS: u32 = 5;
 pub const ABOUT_BATTERY_POS_X: i32 = 20;
-pub const ABOUT_BATTERY_PERCENT_Y: i32 = 175;
-pub const ABOUT_BATTERY_VOLTAGE_Y: i32 = 195;
+pub const ABOUT_BATTERY_PERCENT_Y: i32 = 136;
+pub const ABOUT_BATTERY_VOLTAGE_Y: i32 = 166;
 pub const ABOUT_BATTERY_CHARS: u32 = 15;
 
 pub const BLE_ICON_POS_X: i32 = 206;
 
 pub const UPDATE_POS_X: i32 = 10;
 pub const UPDATE_POS_Y: i32 = 226;
-pub const UPDATE_CHARS: u32 = 22;
 
 pub fn text_bounds(font: &MonoFont, chars: u32, pos: Point) -> Rectangle {
     let char_w = font.character_size.width + font.character_spacing;

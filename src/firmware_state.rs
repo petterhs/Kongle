@@ -3,6 +3,10 @@ use crate::ota;
 
 pub const ERASED: u32 = u32::MAX;
 pub const FLAG_SET: u32 = 0xffff_ff01;
+pub const CONFIRM_TOP: u8 = 84;
+pub const CONFIRM_BOTTOM: u8 = 135;
+pub const ARM_TOP: u8 = 164;
+pub const ARM_BOTTOM: u8 = 223;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootState {
@@ -60,12 +64,12 @@ impl Confirmation {
         if self.state != BootState::Trial {
             return false;
         }
-        if self.armed && (118..=160).contains(&y) {
+        if self.armed && (CONFIRM_TOP..=CONFIRM_BOTTOM).contains(&y) {
             self.armed = false;
             self.requested = true;
             return true;
         }
-        if (183..=230).contains(&y) {
+        if (ARM_TOP..=ARM_BOTTOM).contains(&y) {
             // The original button becomes Cancel. Repeated reports cannot confirm.
             self.armed = !self.armed;
             return true;

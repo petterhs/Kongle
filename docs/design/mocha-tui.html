@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="nb">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kongle – Mocha UI-skisse</title>
+<style>
+  :root { color-scheme: dark; font: 16px system-ui; background:#181825; color:#cdd6f4 }
+  body { max-width:760px; margin:40px auto; padding:0 20px }
+  h1 { font-size:24px } p { line-height:1.6 }
+  canvas { display:block; width:480px; max-width:100%; height:auto; background:#1e1e2e;
+    border:12px solid #11111b; border-radius:24px; box-sizing:content-box; touch-action:none }
+  button,select { font:inherit; padding:9px 12px; margin:4px; color:inherit; background:#313244;
+    border:1px solid #585b70; border-radius:6px }
+  button:focus-visible,select:focus-visible { outline:2px solid #89b4fa }
+  label { display:inline-block; margin:8px 0 } small { color:#a6adc8 }
+</style>
+<h1>Kongle / Mocha</h1>
+<p>Lokal UX-skisse med eksempeldata. Trykk på innholdet eller sveip vannrett mellom
+klokke, hjemmestyring og varsler. Trykk på skritttallet for aktivitet.
+Sveip opp fra klokka for innstillinger.
+Knappen vekker til klokka, går hjem fra andre sider og slukker fra klokka.</p>
+<canvas width="240" height="240" aria-label="Interaktiv skisse av Kongles skjerm"></canvas>
+<p id="status" aria-live="polite"></p>
+<div>
+  <button id="hardware">Klokkeknapp</button>
+  <button id="doublepress">Dobbelttrykk → medier</button>
+  <button data-page="clock">Klokke</button><button data-page="activity">Aktivitet</button>
+  <button data-page="notifications">Varsler</button><button data-page="settings">Innstillinger</button>
+  <button data-page="media">Medier</button><button data-page="home">Hjemmestyring</button>
+</div>
+<label>Sifre <select id="digits"><option value="segments">Sju-segment</option><option value="mono">Monospace</option></select></label>
+<label>UI-tekst <select id="font"><option value="18">18 px</option><option value="20">20 px</option></select></label>
+<label><input id="rgb" type="checkbox" checked> Tilnærmet RGB565</label>
+<label>Klokkespråk <select id="language"><option value="en">English</option><option value="nb">Norsk bokmål</option></select></label>
+<label><input id="playing" type="checkbox" checked> Aktiv medieøkt</label>
+<p><small>Canvas er 240 × 240; vist i dobbel størrelse. Nettleserens monospace-font og
+kantutjevning tilsvarer ikke firmwarefonten. Lysstyrke, LCD-kontrast og fysiske trykkflater må testes på klokka.
+Ingen firmwareinnstillinger endres. Dobbelttrykk-knappen demonstrerer bare målsiden;
+timingen mellom faktiske knappetrykk og langt trykk/reset er ikke simulert.</small></p>
+<script>
+'use strict';
+// Catppuccin Mocha palette v1.8.0: https://github.com/catppuccin/palette
+const palette = {base:'#1e1e2e',surface:'#313244',border:'#585b70',text:'#cdd6f4',muted:'#a6adc8',accent:'#89b4fa',green:'#a6e3a1'};
+const canvas=document.querySelector('canvas'), ctx=canvas.getContext('2d');
+const font=document.querySelector('#font'), digits=document.querySelector('#digits'), rgb=document.querySelector('#rgb');
+const language=document.querySelector('#language'), playing=document.querySelector('#playing');
+let page='clock', awake=true, vibrate=true, brightness=2, pointer=null;
+let paused=false, lastAction='', lastMediaEvent='';
+const strings={
+  en:{date:'Monday 9 Nov',activity:'activity',steps:'steps today',goal:'goal 8000',notifications:'alerts · 2',
+    message:'message',messageTitle:'Message',messageBody:'On my way home',calendar:'Calendar',meeting:'Meeting in 10 min',
+    goodbye:'See you soon!',settings:'settings',light:'Light',vibration:'Vibration',on:'on',off:'off',system:'System',
+    battery:'Battery 3.91 V',firmware:'Firmware',trial:'Trial firmware',reset:'Reset restores',previous:'previous firmware.',
+    confirm:'Confirm …',media:'media',noMedia:'No playback',chapter:'Chapter 12',home:'home',example:'Example · connected',
+    actions:['Living','Kitchen','Reading','Evening'],sent:'sent (demo)'},
+  nb:{date:'mandag 9. nov',activity:'aktivitet',steps:'skritt i dag',goal:'mål 8000',notifications:'varsler · 2',
+    message:'melding',messageTitle:'Melding',messageBody:'På vei hjem',calendar:'Kalender',meeting:'Møte om 10 min',
+    goodbye:'Ses snart!',settings:'innstillinger',light:'Lys',vibration:'Vibrasjon',on:'på',off:'av',system:'System',
+    battery:'Batteri 3,91 V',firmware:'Firmware',trial:'Prøveversjon',reset:'Reset gjenoppretter',previous:'forrige firmware.',
+    confirm:'Bekreft …',media:'medier',noMedia:'Ingen avspilling',chapter:'Kapittel 12',home:'hjemme',example:'Eksempel · tilkoblet',
+    actions:['Stue','Kjøkken','Leselys','Kveld'],sent:'sendt (demo)'}
+};
+function t(key){return strings[language.value][key]}
+function color(role) {
+  const hex=palette[role] || role;
+  if (!rgb.checked) return hex;
+  const n=parseInt(hex.slice(1),16), r=n>>16, g=(n>>8)&255, b=n&255;
+  return `rgb(${Math.round((r>>3)*255/31)},${Math.round((g>>2)*255/63)},${Math.round((b>>3)*255/31)})`;
+}
+function text(value,x,y,role='text',size=+font.value) {
+  ctx.fillStyle=color(role); ctx.font=`${size}px monospace`; ctx.textBaseline='top'; ctx.fillText(value,x,y);
+}
+function panel(title,x,y,w,h) {
+  ctx.strokeStyle=color('border'); ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(x+.5,y+.5,w-1,h-1,7); ctx.stroke();
+  ctx.font=`${+font.value}px monospace`;
+  const labelWidth=ctx.measureText(title).width;
+  ctx.fillStyle=color('base'); ctx.fillRect(x+10,y-9,labelWidth+8,20);
+  text(title,x+14,y-9,'accent');
+}
+function header() {
+  // Indicative 24 px symbols; production keeps the existing icon library.
+  ctx.strokeStyle=color('muted'); ctx.lineWidth=2;
+  ctx.strokeRect(10,6,20,12); ctx.fillStyle=color('green'); ctx.fillRect(13,9,12,6); ctx.fillRect(30,10,2,4);
+  text('76%',39,4,'muted',16);
+  ctx.strokeStyle=color('muted'); ctx.strokeRect(117,5,21,15);
+  ctx.beginPath();ctx.moveTo(121,20);ctx.lineTo(119,24);ctx.lineTo(128,20);ctx.stroke();
+  text('2',145,4,'muted',16);
+  ctx.strokeStyle=color('accent'); ctx.beginPath();
+  ctx.moveTo(215,2); ctx.lineTo(215,24); ctx.lineTo(223,17); ctx.lineTo(209,7);
+  ctx.moveTo(215,2); ctx.lineTo(223,9); ctx.lineTo(209,20); ctx.stroke();
+}
+const masks=[0x3f,0x06,0x5b,0x4f,0x66,0x6d,0x7d,0x07,0x7f,0x6f];
+function digit(n,x,y) {
+  const boxes=[[5,0,24,5],[29,5,5,27],[29,37,5,27],[5,64,24,5],[0,37,5,27],[0,5,5,27],[5,32,24,5]];
+  boxes.forEach(([dx,dy,w,h],i)=>{ctx.fillStyle=color(masks[n]&(1<<i)?'text':'#252535');ctx.fillRect(x+dx,y+dy,w,h)});
+}
+function row(label,value,y) { text(label,20,y); text(value,206-ctx.measureText(value).width,y,'accent'); }
+function statusIcon(kind,x,y) {
+  ctx.strokeStyle=color('accent');ctx.lineWidth=1.5;ctx.beginPath();
+  if(kind==='steps') {
+    ctx.ellipse(x+7,y+8,3,6,-.3,0,Math.PI*2);ctx.ellipse(x+17,y+16,3,6,.3,0,Math.PI*2);
+  } else if(kind==='inside') {
+    ctx.moveTo(x+1,y+11);ctx.lineTo(x+12,y+2);ctx.lineTo(x+23,y+11);
+    ctx.moveTo(x+5,y+8);ctx.lineTo(x+5,y+23);ctx.lineTo(x+19,y+23);ctx.lineTo(x+19,y+8);
+    ctx.moveTo(x+12,y+12);ctx.lineTo(x+12,y+19);
+  } else if(kind==='outside') {
+    ctx.arc(x+12,y+12,5,0,Math.PI*2);
+    for(let i=0;i<8;i++){const a=i*Math.PI/4;ctx.moveTo(x+12+8*Math.cos(a),y+12+8*Math.sin(a));ctx.lineTo(x+12+11*Math.cos(a),y+12+11*Math.sin(a))}
+  } else {
+    ctx.moveTo(x+12,y+1);ctx.bezierCurveTo(x-5,y+20,x+8,y+28,x+16,y+22);
+    ctx.bezierCurveTo(x+25,y+18,x+20,y+12,x+12,y+1);
+  }
+  ctx.stroke();
+}
+function statusValue(kind,value,x,y){statusIcon(kind,x,y);text(value,x+30,y+4,'text',18)}
+function render() {
+  ctx.fillStyle=color(awake?'base':'#000000'); ctx.fillRect(0,0,240,240);
+  document.querySelector('#status').textContent=awake?`Visning: ${page}`:'Skjermen sover';
+  if (!awake) return;
+  header();
+  if (page==='clock') {
+    panel(t('date'),8,44,224,108);
+    if(digits.value==='segments') {digit(1,27,69);digit(2,67,69);digit(4,136,69);digit(8,176,69);
+      ctx.fillStyle=color('accent');ctx.fillRect(117,88,5,5);ctx.fillRect(117,113,5,5);
+    } else text('12:48',26,73,'text',60);
+    const decimal=language.value==='nb'?',':'.';
+    statusValue('steps','2342',14,163);statusValue('inside',`21${decimal}5°`,132,163);
+    statusValue('outside',`8${decimal}2°`,14,207);statusValue('humidity','42%',132,207);
+  } else if(page==='activity') {
+    panel(t('activity'),8,44,224,188); text('2342',24,72,'text',38); text(t('steps'),24,119,'muted');
+    ctx.fillStyle=color('surface');ctx.fillRect(24,160,192,8);ctx.fillStyle=color('accent');ctx.fillRect(24,160,101,8);
+    text(t('goal'),24,191,'muted');
+  } else if(page==='notifications') {
+    panel(t('notifications'),8,44,224,188);
+    text(t('messageTitle'),20,65,'accent');text(t('messageBody'),20,92);text('12:42',20,119,'muted',16);
+    ctx.strokeStyle=color('surface');ctx.beginPath();ctx.moveTo(20,147);ctx.lineTo(220,147);ctx.stroke();
+    text(t('calendar'),20,159,'accent');text(t('meeting'),20,188);
+  } else if(page==='message') {
+    panel(t('message'),8,44,224,188);text(t('messageBody'),20,71);text(t('goodbye'),20,99);
+    text('æ ø å · é ü ñ',20,153,'muted',16);text('12:42',20,200,'muted',16);
+  } else if(page==='settings') {
+    panel(t('settings'),8,44,224,188);
+    row(t('light'),`${brightness}/3`,70);row(t('vibration'),vibrate?t('on'):t('off'),119);row(t('system'),'›',168);
+  } else if(page==='system') {
+    panel(t('system'),8,44,224,188);text('Kongle 0.3.1',20,68);text('PineTime',20,100,'muted');
+    text(t('battery'),20,137,'muted',16);text(t('firmware')+' ›',20,185,'accent');
+  } else if(page==='firmware') {
+    panel(t('firmware'),8,44,224,188);text(t('trial'),20,72,'accent');text(t('reset'),20,107,'muted',16);
+    text(t('previous'),20,130,'muted',16);text(t('confirm'),20,190,'accent');
+  } else if(page==='media') {
+    panel(t('media'),8,44,224,188);
+    if(!playing.checked) {text(t('noMedia'),20,88,'muted');return}
+    text(t('chapter'),20,64);text('12:34',20,96,'muted');
+    mediaControl('prev',16,145);mediaControl(paused?'play':'pause',88,145);mediaControl('next',160,145);
+    text(lastMediaEvent,20,213,'muted',14);
+  } else if(page==='home') {
+    panel(t('home'),8,44,224,188);
+    t('actions').forEach((label,i)=>control(label,16+(i%2)*108,63+Math.floor(i/2)*72,100,62));
+    text(lastAction||t('example'),18,213,'muted',14);
+  }
+}
+function control(label,x,y,w,h) {
+  ctx.fillStyle=color('surface');ctx.beginPath();ctx.roundRect(x,y,w,h,6);ctx.fill();
+  ctx.font=`${+font.value}px monospace`;text(label,x+(w-ctx.measureText(label).width)/2,y+(h-+font.value)/2);
+}
+function mediaControl(kind,x,y) {
+  control('',x,y,64,60);ctx.fillStyle=color('text');
+  if(kind==='pause'){ctx.fillRect(x+21,y+18,6,24);ctx.fillRect(x+36,y+18,6,24);return}
+  const right=kind!=='prev',count=kind==='play'?1:2;
+  for(let i=0;i<count;i++){const xx=x+19+i*15;ctx.beginPath();ctx.moveTo(xx+(right?0:13),y+18);
+    ctx.lineTo(xx+(right?13:0),y+30);ctx.lineTo(xx+(right?0:13),y+42);ctx.fill()}
+}
+function show(next) {awake=true;page=next;render()}
+function swipe(dx,dy) {
+  if(!awake)return;
+  if(Math.abs(dx)>Math.abs(dy)) {
+    const pages=['home','clock','notifications'],i=pages.indexOf(page);
+    if(i>=0)show(pages[Math.max(0,Math.min(2,i+(dx<0?1:-1)))]);
+    else show(page==='message'?'notifications':page==='firmware'?'system':'clock');
+  } else if(dy<0 && page==='clock') show('settings');
+  else if(dy>0)show(page==='firmware'?'system':page==='system'?'settings':page==='message'?'notifications':'clock');
+}
+function tap(x,y) {
+  if(!awake)return;
+  if(y<30&&x>=104&&x<=176)show('notifications');
+  else if(page==='clock' && y>=157) {
+    if(x<120&&y<202)show('activity');else show('home');
+  }
+  else if(page==='notifications' && y>=55 && y<145)show('message');
+  else if(page==='settings') {
+    if(y>=57&&y<106)brightness=brightness%3+1;
+    else if(y>=106&&y<155)vibrate=!vibrate;
+    else if(y>=155&&y<210)page='system';render();
+  } else if(page==='system'&&y>=175)show('firmware');
+  else if(page==='media'&&playing.checked) {
+    if(y>=145&&y<205&&x>=16&&x<224) {
+      if(x<80)lastMediaEvent='PREVIOUS · 0x04';
+      else if(x>=160)lastMediaEvent='NEXT · 0x03';
+      else if(x>=88&&x<152){paused=!paused;lastMediaEvent=paused?'PAUSE · 0x01':'PLAY · 0x00'}
+    }render();
+  } else if(page==='home'&&y>=63&&y<197&&x>=16&&x<224) {
+    const i=(y>=135?2:0)+(x>=124?1:0);lastAction=`${t('actions')[i]} · ${t('sent')}`;render();
+  }
+}
+function position(e) {const r=canvas.getBoundingClientRect();return {x:(e.clientX-r.left-12)*240/(r.width-24),y:(e.clientY-r.top-12)*240/(r.height-24)}}
+canvas.addEventListener('pointerdown',e=>{pointer=position(e);canvas.setPointerCapture(e.pointerId)});
+canvas.addEventListener('pointerup',e=>{if(!pointer)return;const p=position(e),dx=p.x-pointer.x,dy=p.y-pointer.y;pointer=null;
+  if(Math.hypot(dx,dy)>30)swipe(dx,dy);else tap(p.x,p.y)});
+canvas.addEventListener('pointercancel',()=>{pointer=null});
+document.querySelector('#hardware').onclick=()=>{if(!awake||page!=='clock')show('clock');else{awake=false;render()}};
+document.querySelector('#doublepress').onclick=()=>show('media');
+document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>show(b.dataset.page));
+[font,digits,rgb,language,playing].forEach(control=>control.onchange=()=>{lastAction='';render()});
+render();
+</script>
+</html>

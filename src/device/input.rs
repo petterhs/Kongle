@@ -12,6 +12,8 @@ use crate::touch::{self, TouchEvent};
 pub enum InputEvent {
     ButtonPressed,
     ButtonReleased,
+    ButtonSingleConfirmed,
+    ButtonDoublePressed,
     ButtonHeld,
     TouchWake,
     Touch(TouchEvent),

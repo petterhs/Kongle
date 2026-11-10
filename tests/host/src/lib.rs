@@ -1,5 +1,43 @@
 // Compile the hardware-independent firmware modules on the host.
 #![allow(dead_code)]
+#[path = "../../../src/ble_identity.rs"]
+mod ble_identity;
+#[path = "../../../src/button_gestures.rs"]
+mod button_gestures;
+#[path = "../../../src/ui/language.rs"]
+mod language;
+#[path = "../../../src/media.rs"]
+mod media;
+#[path = "../../../src/ui/theme.rs"]
+mod theme;
+#[path = "../../../src/ui.rs"]
+mod ui;
+#[path = "../../../src/ui/layout.rs"]
+mod ui_layout;
+#[path = "../../../src/ui/text.rs"]
+mod ui_text;
+
+const FIRMWARE_VERSION: &str = "0.4.0+preview";
+#[derive(Clone, Copy)]
+struct TimeState {
+    year: u16,
+    month: u8,
+    day: u8,
+    hours: u8,
+    minutes: u8,
+    seconds: u8,
+}
+mod device {
+    pub(crate) use crate::display;
+    pub(crate) mod battery {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        pub struct BatteryState {
+            pub mv: u16,
+            pub percent: u8,
+            pub charging: bool,
+        }
+    }
+}
 #[path = "../../../src/battery_estimate.rs"]
 mod battery_estimate;
 #[path = "../../../src/battery_history.rs"]
@@ -20,6 +58,9 @@ mod notifications;
 mod ota;
 #[path = "../../../src/touch.rs"]
 mod touch;
+
+#[cfg(test)]
+mod ui_tests;
 
 #[cfg(test)]
 mod tests {
@@ -68,7 +109,7 @@ mod tests {
         ] {
             ui.set_state(state);
             ui.tap(200);
-            ui.tap(140);
+            ui.tap(110);
             assert!(!ui.take_request());
         }
         ui.set_state(BootState::Trial);
@@ -76,15 +117,17 @@ mod tests {
         assert!(ui.armed);
         assert!(!ui.take_request());
         ui.tap(200); // A duplicate first tap is Cancel, never confirmation.
-        ui.tap(140);
+        ui.tap(110);
         assert!(!ui.take_request());
         ui.tap(200);
         assert!(ui.cancel()); // Navigation/button/notification cancels and redraws the dialog.
         assert!(!ui.cancel());
-        ui.tap(140);
+        ui.tap(110);
         assert!(!ui.take_request());
         ui.tap(200);
-        ui.tap(140);
+        ui.tap(140); // Old confirmation location is now the gap, never a write.
+        assert!(!ui.take_request());
+        ui.tap(110);
         assert!(ui.take_request());
         assert!(!ui.take_request());
     }
@@ -96,10 +139,11 @@ mod tests {
         let mut nav = Navigation::new();
         nav.handle(SwipeUp);
         nav.handle(Tap { x: 100, y: 210 });
+        nav.handle(Tap { x: 100, y: 110 });
         assert_eq!(nav.page(), Page::Firmware);
         assert!(nav.handle(SwipeDown));
-        assert_eq!(nav.page(), Page::Launcher);
-        nav.handle(Tap { x: 100, y: 210 });
+        assert_eq!(nav.page(), Page::System);
+        nav.handle(Tap { x: 100, y: 110 });
         assert!(nav.button(true));
         assert_eq!(nav.page(), Page::Clock);
     }
@@ -264,28 +308,36 @@ mod tests {
     }
 
     #[test]
-    fn navigation_uses_four_clock_swipes_and_bounded_return_stack() {
+    fn navigation_uses_compact_clock_targets_and_bounded_return_stack() {
         use navigation::{Navigation, Page};
         use touch::TouchEvent::*;
-
         let mut nav = Navigation::new();
         assert!(nav.handle(SwipeUp));
-        assert_eq!(nav.page(), Page::Launcher);
-        assert!(nav.handle(Tap { x: 20, y: 100 }));
+        assert_eq!(nav.page(), Page::Settings);
+        assert!(nav.handle(Tap { x: 20, y: 160 }));
+        assert_eq!(nav.page(), Page::Preferences);
+        assert!(nav.handle(SwipeDown));
         assert_eq!(nav.page(), Page::Settings);
         assert!(nav.handle(SwipeDown));
-        assert_eq!(nav.page(), Page::Launcher);
-        assert!(nav.handle(SwipeDown));
         assert_eq!(nav.page(), Page::Clock);
+        assert!(nav.handle(SwipeRight));
+        assert_eq!(nav.page(), Page::Home);
+        assert!(nav.handle(SwipeLeft));
+        assert_eq!(nav.page(), Page::Clock);
+        assert!(nav.handle(SwipeLeft));
+        assert_eq!(nav.page(), Page::Media);
+        assert!(nav.handle(SwipeRight));
         assert!(nav.handle(SwipeDown));
         assert_eq!(nav.page(), Page::Notifications);
         assert!(nav.handle(SwipeUp));
-        assert!(nav.handle(SwipeRight));
-        assert_eq!(nav.page(), Page::Settings);
+        assert!(nav.handle(Tap { x: 50, y: 180 }));
+        assert_eq!(nav.page(), Page::Activity);
         assert!(nav.handle(SwipeDown));
-        assert!(nav.handle(SwipeLeft));
-        assert_eq!(nav.page(), Page::About);
-        assert!(nav.clock());
+        assert!(nav.handle(Tap { x: 140, y: 15 }));
+        assert_eq!(nav.page(), Page::Notifications);
+        nav.media();
+        assert_eq!(nav.page(), Page::Media);
+        assert!(nav.handle(SwipeRight));
         assert_eq!(nav.page(), Page::Clock);
     }
 
