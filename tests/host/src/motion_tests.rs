@@ -23,6 +23,7 @@ impl embedded_hal::i2c::Error for Fault {
 struct Sensor {
     id: u8,
     status: u8,
+    completion_status: u8,
     registers: [u8; 256],
     features: [u8; 70],
     uploaded: Vec<u8>,
@@ -42,7 +43,8 @@ impl Sensor {
         features[0x43] = 0x12;
         Self {
             id,
-            status: 1,
+            status: 0,
+            completion_status: 1,
             registers: [0; 256],
             features,
             uploaded: Vec::new(),
@@ -79,6 +81,7 @@ impl Sensor {
             self.registers[reg..reg + data.len()].copy_from_slice(data);
             if reg == 0x59 && data == [1] {
                 self.loaded = true;
+                self.status = self.completion_status;
                 self.feature_pointer = 0x406;
             }
             // Exercise the vendor's APS handoff rather than assuming INIT_CTRL
@@ -206,7 +209,7 @@ fn failed_upload_or_bad_asic_status_never_enables_acceleration() {
     for fail_upload in [true, false] {
         let (mut driver, sensor) = fixture(0x11);
         sensor.borrow_mut().fail_upload = fail_upload;
-        sensor.borrow_mut().status = 2;
+        sensor.borrow_mut().completion_status = 2;
         let error = run(driver.initialize()).unwrap_err();
         assert_eq!(
             error,
@@ -278,4 +281,14 @@ fn lost_engine_state_makes_counts_unavailable_and_shutdown_restores_power_save()
     run(driver.stop()).unwrap();
     assert_eq!(sensor.borrow().registers[0x7c] & 1, 1);
     assert_eq!(sensor.borrow().registers[0x7d] & 4, 0);
+}
+
+#[test]
+fn previously_initialized_asic_is_rejected_before_upload_or_sensor_writes() {
+    let (mut driver, sensor) = fixture(0x11);
+    sensor.borrow_mut().status = 1;
+    assert_eq!(run(driver.initialize()), Err(Error::NeedsReset(1)));
+    assert_eq!(sensor.borrow().writes, 0);
+    assert!(sensor.borrow().uploaded.is_empty());
+    assert_eq!(run(driver.counter()), Err(Error::NotInitialized));
 }

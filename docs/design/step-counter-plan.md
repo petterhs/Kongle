@@ -69,13 +69,16 @@ Capture `[motion] ... ready; config ID ..., accel 28, range 00` followed by
 `[motion] raw steps: ...`, or the initialization error. Check touch, BLE and
 screen sleep/wake during and after initialization. Test a small counted walk
 and wait for delayed/batched sensor reporting. These values are sensor totals,
-not daily counts; initialization/reboot may restart them. They are intentionally
+not daily counts; each firmware boot now resets them. They are intentionally
 not exposed as daily steps through BLE yet.
 
 The first active hardware test failed with the old generic `Readback` error;
 touch continued to work. Initialization now follows Bosch's APS handoff after
-configuration loading before fetching the feature-window pointer. Whether that
-sequence difference caused the observed failure still needs hardware evidence.
+configuration loading before fetching the feature-window pointer. This did not
+fix the hardware failure: the next test reported `start: 3064, config_id: 0`,
+with feature bytes remaining zero. 3064 is exactly the final upload word address
+(`(6144 - 16) / 2`), consistent with attempting to reinitialize an ASIC that
+retained its old state across an MCU reset.
 Failures now identify `FeatureAddress`, `FeatureReadback` (start pointer,
 configuration ID, expected/actual bytes) or `RegisterReadback` (register, mask,
 expected/actual value), rather than concealing which check failed. These checks
@@ -94,11 +97,22 @@ protocol handling, not physical initialization or counting accuracy. UI tests
 check that count updates leave other regions/pages unchanged. Bosch notices
 accompany the raw MCUBoot build output and are included in the DFU ZIP.
 
-Still verify cancellation/error cleanup without disrupting touch and startup
-after each boot path. The driver deliberately sends no soft reset: the reference
-PineTime setup requires TWI recovery after that command, which needs its own
-hardware audit. Do not assume successful cold initialization proves OTA/trial
-handoff behavior.
+Startup now probes a known chip and sends soft reset before the shared bus or
+touch tasks are created. A temporary TWIM driver uses bounded 20 ms blocking
+transactions at this stage, then is dropped even on timeout. Buffers remain
+alive until TWIM is disabled. After a 200 ms settling delay, TWIM is recreated
+using owned/reborrowed peripherals without register access behind the HAL.
+The motion driver requires fresh ASIC status zero before any upload; a stale
+success status is `NeedsReset`, not proof that our own initialization succeeded.
+Unknown chips receive no reset. Touch still starts if probing fails.
+
+The [Bosch BMA423 data sheet, section 4.2](https://www.bndhep.net/Electronics/Data/BMA423.pdf)
+requires INIT_CTRL initialization only once per power-on/soft reset. The
+PineTime [reference startup](https://github.com/InfiniTimeOrg/InfiniTime/blob/9ad16304f5fd526b781a760cf1313813d232645e/src/drivers/Bma421.cpp)
+also requires sensor reset plus TWI recovery. The changed startup still needs
+hardware validation, including repeated MCU resets, touch, BLE and OTA/trial
+handoff. Host tests now reject a previously initialized ASIC before any upload.
+Do not assume successful cold initialization proves warm startup behavior.
 
 ## 2. Establish a baseline before tuning
 

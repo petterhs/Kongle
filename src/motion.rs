@@ -40,6 +40,7 @@ pub enum Error<E> {
     Bus(E),
     UnknownChip(u8),
     InitializationStatus(u8),
+    NeedsReset(u8),
     FeatureAddress {
         words: u16,
     },
@@ -136,13 +137,18 @@ impl<I: I2c, D: DelayNs> Motion<I, D> {
 
     /// Baseline: 100 Hz, ±2g, average 4, CIC mode; not a tuned accuracy claim.
     /// Caller must bound the whole operation with a timeout and keep sensor
-    /// resets separate from touch. No soft-reset command is sent here.
+    /// resets separate from touch. Caller must reset the sensor and recreate
+    /// TWIM before sharing the bus; reloading an initialized ASIC is invalid.
     pub async fn initialize(&mut self) -> Result<Configuration, Error<I::Error>> {
         self.ready = false;
         self.identified = false;
         let id = self.byte(0x00).await?;
         let variant = Variant::from_id(id).ok_or(Error::UnknownChip(id))?;
         self.identified = true;
+        let previous_status = self.byte(0x2a).await? & 0x0f;
+        if previous_status != 0 {
+            return Err(Error::NeedsReset(previous_status));
+        }
         // Preserve unrelated power bits and disable acceleration during upload.
         let power = self.byte(0x7d).await? & !0x04;
         self.write(0x7d, &[power]).await?;

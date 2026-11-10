@@ -41,7 +41,6 @@ use embassy_nrf::{
     gpiote::{OutputChannel as GpioteOutput, OutputChannelPolarity},
     ppi::Ppi,
     timer::{Frequency as TimerFrequency, Timer as HardwareTimer},
-    twim::{Config as TwimConfig, Twim},
 };
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
 use embassy_sync::mutex::Mutex as AsyncMutex;
@@ -566,28 +565,22 @@ async fn main(spawner: Spawner) {
         Input::new(p.P0_13, Pull::Down),
         Output::new(p.P0_15, Level::High, OutputDrive::Standard),
     );
-    let mut touch_config = TwimConfig::default();
-    touch_config.sda_pullup = true;
-    touch_config.scl_pullup = true;
-    let sensor_bus = SENSOR_BUS.init(AsyncMutex::new(Twim::new(
-        p.TWISPI1,
-        Irqs,
-        p.P0_06,
-        p.P0_07,
-        touch_config,
-        SENSOR_TX_BUFFER.init([0; 32]),
-    )));
+    let (twim, motion_known) =
+        device::i2c::prepare(p.TWISPI1, p.P0_06, p.P0_07, SENSOR_TX_BUFFER.init([0; 32])).await;
+    let sensor_bus = SENSOR_BUS.init(AsyncMutex::new(twim));
     let touch = device::input::TouchScreen::new(
         device::i2c::Device::new(sensor_bus),
         Input::new(p.P0_28, Pull::Up),
         Output::new(p.P0_10, Level::High, OutputDrive::Standard),
     );
-    spawner
-        .spawn(motion_task(
-            device::i2c::Device::new(sensor_bus),
-            SCREEN_AWAKE_WATCH.receiver().unwrap(),
-        ))
-        .unwrap();
+    if motion_known {
+        spawner
+            .spawn(motion_task(
+                device::i2c::Device::new(sensor_bus),
+                SCREEN_AWAKE_WATCH.receiver().unwrap(),
+            ))
+            .unwrap();
+    }
 
     // PineTime backlight pins (active-low): P0.14, P0.22, P0.23
     let backlight_low = Output::new(p.P0_14, Level::High, OutputDrive::Standard);
