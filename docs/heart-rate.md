@@ -149,3 +149,60 @@ outdated async operation cannot unsubscribe a newly installed listener.
 6. Test removal, ambient light changes, loose fit, movement, reconnect and
    reboot; note false positives, missing values and shutdown errors. Measure
    battery trends before considering any automatic sampling mode.
+
+## Resume point: InfiniTime comparison (2026-11-10)
+
+Maintainer tested `0.4.0+3193736`: Furu now receives repeated
+`HR: notification [00 00] -> no valid reading`, but no valid BPM. This confirms
+notification delivery to the parser for those packets, not pulse accuracy.
+The stricter gate has suppressed results; the underlying optical/DSP problem
+is still unresolved. Do not mark HR complete or keep tightening thresholds
+without a captured waveform.
+
+Read-only upstream comparison at InfiniTime commit
+`9ad16304f5fd526b781a760cf1313813d232645e`:
+
+- [Hrs3300.cpp](https://github.com/InfiniTimeOrg/InfiniTime/blob/9ad16304f5fd526b781a760cf1313813d232645e/src/drivers/Hrs3300.cpp):
+  Enable baseline 0x50 (50 ms conversion wait), resolution 0x77 (15-bit),
+  gain x1, PDRIVER 0x2f. Kongle uses 0x60, 0x66 and calibrated x1–x8;
+  LED drive selection is already the same. Upstream comments describe
+  experimentally improved signal quality and an approximately 50 ms ADC
+  conversion period at 15 bits. This is not a measured timing guarantee here.
+- [Ppg.h](https://github.com/InfiniTimeOrg/InfiniTime/blob/9ad16304f5fd526b781a760cf1313813d232645e/src/components/heartrate/Ppg.h)
+  and [HeartRateTask.cpp](https://github.com/InfiniTimeOrg/InfiniTime/blob/9ad16304f5fd526b781a760cf1313813d232645e/src/heartratetask/HeartRateTask.cpp):
+  host acquisition at 100 ms (10 Hz), 64 samples (6.4 seconds), five new samples
+  per analysis (0.5 seconds). A post-enable settling delay precedes acquisition.
+- [Ppg.cpp](https://github.com/InfiniTimeOrg/InfiniTime/blob/9ad16304f5fd526b781a760cf1313813d232645e/src/components/heartrate/Ppg.cpp):
+  detrending/differencing, band-pass filtering, Hann window and FFT, spectral
+  averaging, dominant-peak quality checks (noise ratio, width, multiple peaks,
+  residual DC), then output averaging over up to 20 nonzero results. Ambient
+  light changes can reset acquisition. Kongle's local-peak intervals plus
+  delayed similarity and sustained confirmation are a different estimator;
+  stricter confirmation alone does not correct double counting or weak signal.
+
+Recommended next bounded experiment:
+
+1. Capture a full stationary diagnostic stream with current firmware using
+   nRF Connect as above, ideally with an independently counted reference rate.
+2. Compare optical acquisition with the upstream 15-bit/50 ms/x1 settings,
+   preserving raw timestamps and unchanged LED current. Update clipping bounds
+   consistently with resolution. Do not merely change SAMPLE_MS to 100: the
+   current smoothing, waveform length and lag calculations assume 25 Hz and
+   must be adapted together if sampling changes. Separate sensor and DSP
+   experiments so results remain interpretable.
+3. Replay the same captured signal through candidate independent Rust filters
+   and period/spectral estimators on the host before another closed-watch OTA.
+   Inspect harmonics, irregular sample timing, gain transitions and signal/noise.
+   FFT is an option, not an automatic requirement; evaluate RAM/flash and CPU
+   cost on nRF52832. Do not copy upstream DSP implementation into this project.
+4. Recheck repeated readings, removal/movement rejection, LED shutdown and BLE
+   delivery. Keep trial/recovery behavior until physical validation passes.
+
+Testing artifacts should be placed in `/home/s27731/sync-phone-apps` per the
+maintainer's request; Syncthing transfers this folder to the phone. Current
+files there are `kongle-heart-rate-stability-dfu.zip` and
+`furu-heart-rate-diagnostics-dev.apk`. The firmware ZIP was already there when
+this investigation resumed; the diagnostic APK was copied there now. Continue
+on local branches `feature/heart-rate` (`/tmp/kongle-sensors`) and
+`feature/kongle-heart-rate` (`/tmp/furu-steps`); this investigation changes docs
+only. Next development/testing can resume after the usage quota resets.
