@@ -1,6 +1,123 @@
 use crate::heart_rate::{Estimator, Phase, Reading, State, MAX_MEASUREMENT_MS, SAMPLE_MS};
 
 #[test]
+fn review_regressions_keep_pulse_under_drift_jitter_and_changing_amplitude() {
+    for case in [
+        "clean",
+        "weak",
+        "baseline_drift",
+        "scheduler_jitter",
+        "amplitude_modulation",
+    ] {
+        let mut estimator = Estimator::new();
+        let mut readings = Vec::new();
+        for i in 0..450 {
+            let now = i * 100
+                + if case == "scheduler_jitter" && i % 50 == 25 {
+                    30
+                } else {
+                    0
+                };
+            let t = now as f64 / 1000.0;
+            let amplitude = match case {
+                "weak" => 2.0,
+                "amplitude_modulation" => 12.0 + 8.0 * (t * std::f64::consts::TAU / 8.0).sin(),
+                _ => 200.0,
+            };
+            let baseline = if case == "baseline_drift" {
+                7000.0 + 1500.0 * (t * 0.15 * std::f64::consts::TAU).sin()
+            } else {
+                7000.0
+            };
+            let raw =
+                (baseline + amplitude * (t * 1.2 * std::f64::consts::TAU).sin()).round() as u32;
+            if let Some(bpm) = estimator.sample(raw, 6, now) {
+                readings.push(bpm);
+            }
+        }
+        assert!(readings.len() >= 20, "{case}: {readings:?}");
+        assert!(
+            readings.iter().all(|bpm| (70..=74).contains(bpm)),
+            "{case}: {readings:?}"
+        );
+        assert_eq!(estimator.quality().timing_resets, 0, "{case}");
+    }
+}
+
+#[test]
+fn weak_quantization_noise_and_slow_drift_alone_do_not_become_pulse() {
+    for seed in 1u32..=16 {
+        let mut estimator = Estimator::new();
+        let mut random = seed;
+        for i in 0..450 {
+            random = random.wrapping_mul(1664525u32).wrapping_add(1013904223);
+            assert_eq!(
+                estimator.sample(859 + random % 5, 6, i * SAMPLE_MS),
+                None,
+                "seed {seed}"
+            );
+        }
+    }
+    let mut estimator = Estimator::new();
+    for i in 0..450 {
+        let now = i * SAMPLE_MS;
+        let raw =
+            (7000.0 + 1500.0 * (now as f64 / 1000.0 * 0.15 * std::f64::consts::TAU).sin()) as u32;
+        assert_eq!(estimator.sample(raw, 6, now), None);
+    }
+}
+
+#[test]
+fn quality_explains_rejections_preserves_counters_and_encodes_a_stable_payload() {
+    use crate::heart_rate::{Quality, Reason};
+    let mut estimator = Estimator::new();
+    for i in 0..90 {
+        assert_eq!(estimator.sample(7000, 6, i * SAMPLE_MS), None);
+    }
+    let before = estimator.quality();
+    assert_eq!(before.reason, Reason::LowAmplitude);
+    assert_eq!(before.filled, 80);
+    assert!(before.analyses > 0);
+    estimator.sample(7000, 6, 9200); // A real gap clears history and counts it.
+    assert_eq!(estimator.quality().reason, Reason::TimingGap);
+    assert_eq!(estimator.quality().timing_resets, 1);
+    assert_eq!(estimator.quality().filled, 1);
+    estimator.sample(7000, 6, 9100);
+    assert_eq!(estimator.quality().reason, Reason::NonMonotonic);
+    estimator.sample(0, 6, 9300);
+    assert_eq!(estimator.quality().reason, Reason::Dark);
+    estimator.sample(0x7fff, 6, 9400);
+    let after = estimator.quality();
+    assert_eq!(after.reason, Reason::Clipped);
+    assert_eq!(after.invalid_samples, 2);
+    assert_eq!(after.timing_resets, 2);
+    assert_eq!(after.analyses, before.analyses);
+    let encoded = Quality {
+        reason: Reason::Confirming,
+        filled: 80,
+        candidate: 72,
+        timing_resets: 2,
+        invalid_samples: 3,
+        analyses: 4,
+        qualified: 5,
+        amplitude: 6,
+        concentration: 700,
+        similarity: 8000,
+        confirmation: 2,
+        interval_ms: 130,
+    }
+    .encode();
+    assert_eq!(&encoded[..4], &[1, 10, 80, 72]);
+    for (index, value) in [2u16, 3, 4, 5, 6, 700, 8000].iter().enumerate() {
+        assert_eq!(
+            u16::from_le_bytes(encoded[4 + 2 * index..6 + 2 * index].try_into().unwrap()),
+            *value
+        );
+    }
+    assert_eq!(&encoded[18..], &[2, 130]);
+}
+
+#[test]
 fn isolated_candidates_and_rate_jumps_need_sustained_confirmation() {
     use crate::heart_rate::RateConfirmation;
     let mut confirmation = RateConfirmation::new();
@@ -63,12 +180,22 @@ fn out_of_range_signals_are_not_reported_as_their_in_range_subharmonics() {
 
 #[test]
 fn competing_frequency_peaks_are_rejected_instead_of_selecting_a_harmonic() {
-    let mut estimator = Estimator::new();
-    for index in 0..450 {
-        let now = index * SAMPLE_MS;
-        let phase = now as f64 * 72.0 / 60000.0 * std::f64::consts::TAU;
-        let raw = (7000.0 + 200.0 * phase.sin() + 200.0 * (phase * 2.0).sin()) as u32;
-        assert_eq!(estimator.sample(raw, 6, now), None);
+    for competing_bpm in [110.0, 144.0] {
+        let mut estimator = Estimator::new();
+        for index in 0..450 {
+            let now = index * SAMPLE_MS;
+            let phase = now as f64 / 60000.0 * std::f64::consts::TAU;
+            // Slightly greater high-frequency amplitude offsets the low-pass
+            // attenuation, leaving two competing peaks after filtering.
+            let raw = (7000.0
+                + 200.0 * (phase * 72.0).sin()
+                + 220.0 * (phase * competing_bpm).sin()) as u32;
+            assert_eq!(estimator.sample(raw, 6, now), None, "{competing_bpm}");
+        }
+        assert_eq!(
+            estimator.quality().reason,
+            crate::heart_rate::Reason::Ambiguous
+        );
     }
 }
 
@@ -115,7 +242,7 @@ fn large_legal_adc_waveforms_do_not_overflow_frequency_energy() {
 }
 
 #[test]
-fn analog_amplification_before_quantization_can_recover_a_weak_periodic_signal() {
+fn weak_quantized_periodic_signals_are_judged_by_quality_not_absolute_amplitude() {
     for gain in [1, 8] {
         let mut estimator = Estimator::new();
         let mut readings = Vec::new();
@@ -129,9 +256,7 @@ fn analog_amplification_before_quantization_can_recover_a_weak_periodic_signal()
                 readings.push(bpm);
             }
         }
-        if gain == 1 {
-            assert!(readings.is_empty());
-        } else {
+        {
             assert!(readings.len() >= 3);
             assert!(readings
                 .iter()
@@ -199,7 +324,7 @@ fn flat_dark_saturated_and_seeded_random_signals_do_not_become_pulse() {
 
 #[test]
 fn pulse_shaped_waveforms_with_slow_adc_updates_and_drift_are_not_just_sine_tests() {
-    for bpm in [60, 72, 90] {
+    for bpm in [30, 40, 60, 72, 90] {
         for conversion_ms in [40, 75, 100] {
             let mut estimator = Estimator::new();
             let mut readings = Vec::new();
@@ -320,6 +445,7 @@ fn scheduled_jitter_uses_real_beat_times_and_diagnostics_have_a_versioned_layout
         at_ms: 1000,
         error: 0,
         gain: 4,
+        quality: crate::heart_rate::Quality::EMPTY,
     };
     let value = diag.encode(state, 1040);
     assert_eq!(&value[..4], &[3, 1, 72, 0]);

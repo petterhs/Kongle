@@ -571,6 +571,13 @@ async fn heart_task(bus: &'static device::i2c::Bus) {
             }
             match sensor.sample().await {
                 Ok(sample) => {
+                    // Timestamp the completed read, including any shared-bus
+                    // wait, rather than pretending it happened at timer wakeup.
+                    let now = Instant::now();
+                    if state.expired(now.as_millis()) {
+                        timed_out = true;
+                        break;
+                    }
                     diagnostic.ppg = sample.ppg;
                     diagnostic.ambient = sample.ambient;
                     diagnostic.samples = diagnostic.samples.saturating_add(1);
@@ -582,6 +589,7 @@ async fn heart_task(bus: &'static device::i2c::Bus) {
                         diagnostic.max = window_max.min(u32::from(u16::MAX)) as u16;
                         let analysis_at = Instant::now();
                         let reading = estimator.sample(sample.ppg, sample.ambient, now.as_millis());
+                        diagnostic.quality = estimator.quality();
                         let analysis_ms = Instant::now().duration_since(analysis_at).as_millis();
                         if analysis_ms >= 10 {
                             defmt::debug!("[hr] analysis took {} ms", analysis_ms);
@@ -1156,7 +1164,14 @@ async fn main(spawner: Spawner) {
             }
         }
         heart_was_measuring = heart_measuring;
-        if watch_ui.set_heart(heart_state, Instant::now().as_millis()) && awake && !redraw {
+        let heart_changed = watch_ui.set_heart(heart_state, Instant::now().as_millis());
+        let quality_changed = watch_ui.set_heart_quality(
+            HEART_DIAGNOSTICS
+                .try_get()
+                .unwrap_or(heart_rate::Diagnostics::EMPTY)
+                .quality,
+        );
+        if (heart_changed || quality_changed) && awake && !redraw {
             watch_ui.draw_heart(&mut display);
         }
         if let Some(start) = watch_ui.take_heart_request() {

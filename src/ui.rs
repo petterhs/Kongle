@@ -201,6 +201,7 @@ pub struct WatchUi {
     media_request: Option<crate::media::Request>,
     steps: crate::steps::State,
     heart: crate::heart_rate::State,
+    heart_quality: crate::heart_rate::Quality,
     heart_now_ms: u64,
     heart_request: Option<bool>,
 }
@@ -226,6 +227,7 @@ impl WatchUi {
             media_request: None,
             steps: crate::steps::State::EMPTY,
             heart: crate::heart_rate::State::EMPTY,
+            heart_quality: crate::heart_rate::Quality::EMPTY,
             heart_now_ms: 0,
             heart_request: None,
         }
@@ -296,6 +298,14 @@ impl WatchUi {
         self.heart_request.take()
     }
 
+    pub fn set_heart_quality(&mut self, quality: crate::heart_rate::Quality) -> bool {
+        let changed = self.heart_quality.reason != quality.reason
+            || self.heart_quality.filled != quality.filled
+            || self.heart_quality.confirmation != quality.confirmation;
+        self.heart_quality = quality;
+        changed && self.heart_visible()
+    }
+
     fn stop_heart_on_exit(&mut self) {
         if self.heart_visible() {
             self.heart_request = Some(false);
@@ -353,7 +363,42 @@ impl WatchUi {
                 };
                 let _ = Text::new(status, Point::new(20, 98), style).draw(display);
                 let mut age: String<24> = String::new();
-                if let (Some(reading), Some(seconds)) =
+                if self.heart.phase == Phase::Measuring
+                    && self.heart.bpm(self.heart_now_ms).is_none()
+                {
+                    use crate::heart_rate::Reason;
+                    let quality = self.heart_quality;
+                    match quality.reason {
+                        Reason::WarmingUp | Reason::TimingGap | Reason::NonMonotonic => {
+                            let _ = write!(
+                                &mut age,
+                                "{} {}/80",
+                                self.tr("Collecting", "Samler"),
+                                quality.filled
+                            );
+                        }
+                        Reason::Confirming => {
+                            let _ = write!(
+                                &mut age,
+                                "{} {}/4",
+                                self.tr("Checking", "Sjekker"),
+                                quality.confirmation.min(4)
+                            );
+                        }
+                        Reason::Dark => {
+                            let _ = age.push_str(self.tr("Check skin contact", "Sjekk hudkontakt"));
+                        }
+                        Reason::Clipped => {
+                            let _ = age.push_str(self.tr("Signal saturated", "Signal mettet"));
+                        }
+                        Reason::LowAmplitude => {
+                            let _ = age.push_str(self.tr("Signal too weak", "For svakt signal"));
+                        }
+                        _ => {
+                            let _ = age.push_str(self.tr("No clear rhythm", "Ingen tydelig puls"));
+                        }
+                    }
+                } else if let (Some(reading), Some(seconds)) =
                     (self.heart.last, self.heart.age_seconds(self.heart_now_ms))
                 {
                     let _ = write!(&mut age, "{} BPM / {}s", reading.bpm, seconds.min(99999));

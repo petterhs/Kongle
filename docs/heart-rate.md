@@ -49,7 +49,8 @@ validation. The normal 45-second limit and verified shutdown are unchanged.
 The owner requests samples every 100 ms (10 Hz), ignores the first 200 ms for
 processing, and does not replay missed samples in a catch-up burst. Processing
 uses an independent integer implementation: 80 raw samples (eight seconds),
-least-squares baseline detrending, a Hann window and a Goertzel frequency bank
+least-squares baseline detrending, forward/backward band-pass filtering, a Hann
+window and a Goertzel frequency bank
 on a 1 BPM grid from 20 to 280 BPM. Grid spacing is not measurement accuracy.
 Fixed mathematical coefficients are generated from the formulas documented in
 `src/heart_rate_coefficients.rs`; no upstream DSP implementation/tables or new
@@ -58,13 +59,15 @@ BPM signal to be rejected rather than reporting a 120 BPM subharmonic.
 
 Every second, a candidate must pass spectral concentration, rejection of
 competing peaks and normalized delayed waveform similarity. Every two-second
-quarter of the window must have at least 16 raw ADC levels of variation, so an
+quarter of the window must have at least two raw ADC levels of variation, so an
 old pulse burst cannot keep producing fresh results after the signal goes flat.
 Four consistent candidates spanning at least three seconds are required before
 publishing: the first reading can arrive after approximately eleven seconds.
-The allowed candidate change remains 10% (minimum 6 BPM). Actual window duration
-corrects the nominal period; samples outside the 80–120 ms spacing band reset
-history. Timestamp wrapping is supported. Rates remain restricted to 30–220 BPM;
+The allowed candidate change remains 10% (minimum 6 BPM). Bounded scheduling
+jitter is linearly resampled onto a 100 ms grid with Q8 precision. A gap greater
+than 180 ms or non-monotonic time resets history; actual missing 200 ms samples
+are never silently filled. Read timestamps are taken after the I2C transaction,
+including shared-bus wait. Timestamp wrapping is supported. Rates remain restricted to 30–220 BPM;
 15-bit clipping bounds track the changed resolution. Analysis taking at least
 10 ms is logged over RTT to make CPU/scheduling cost visible in hardware tests.
 
@@ -253,7 +256,62 @@ gain, elapsed time, sample counter and missing-sample counts. Repeated reads of
 the same sample are deduplicated; reset markers/counter rollback separate
 measurement sessions. The replay tool compiles the actual firmware estimator
 and reports qualified BPM separately from the captured device result. It resets
-on session/gain changes and does not fill missing samples. Current firmware
-expects 100 ms cadence; old 40 ms captures are not silently resampled. Capture
-gaps can therefore prevent readings even if the watch processed a contiguous
-stream, and replay results alone do not prove physical accuracy.
+on session/gain changes and uses the same bounded-jitter resampling as the
+firmware. Captures must be from the current 10 Hz profile: old 40 ms traces
+belong to a different sensor configuration and are not a valid comparison.
+Capture gaps greater than 180 ms can prevent readings even when the watch
+processed a contiguous stream. Replay results alone do not prove accuracy.
+Each output row now includes the rejection reason, filled sample count, timing
+resets, analysis count, spectral concentration and waveform similarity; a blank
+replayed BPM is explicitly not a reading.
+
+## Review corrections and quality diagnostics (2026-11-11)
+
+Review reproduced zero readings from clean 72 BPM with slow baseline drift,
+low amplitude, amplitude modulation or one 30 ms scheduling delay every five
+seconds. After these changes each of those deterministic 45-second traces gives
+35 readings near 72 BPM. These are host regressions, not measurements on skin.
+
+- A 0.35 Hz Butterworth high-pass biquad and a 4 Hz low-pass are applied forward
+  and backward to each window. High-pass Q=1/sqrt(2), Q30 coefficients from the
+  [standard biquad formula](https://www.w3.org/TR/audio-eq-cookbook/#hpf),
+  normalized by a0; low-pass coefficient is 1-exp(-2*pi*4/10), Q15. Q8 states
+  retain precision. This avoids treating slow optical baseline changes as a
+  dominant out-of-range pulse while keeping a flat low-rate passband.
+- Detrended samples are numerically normalized before filtering. This changes
+  calculation precision only, not LED current, sensor gain or measured optical
+  precision. The arbitrary 16-level cutoff is replaced by the three-level
+  (two-level swing) floor plus relative spectral/periodic quality checks.
+- Short bursts, actual gaps, clipped/dark input, pure slow drift, tiny seeded
+  quantization noise and competing frequency peaks still must be rejected.
+  Pulse-shaped tests now include 30/40 BPM to protect low-rate fundamentals.
+- The watch displays collection progress, confirmation progress or a short
+  rejection explanation on its Pulse page instead of only No reading yet.
+  Updates remain restricted to the existing text regions in both languages.
+
+Read the appended quality characteristic
+`6b6f180d-1886-4b40-ae7d-00a11ce50002` under HR for additional diagnostics.
+Existing 0x2a37 and raw-v3 characteristic handles/payloads are unchanged.
+Refresh services in nRF Connect if the new characteristic is not visible.
+No companion-app changes are required.
+
+| Bytes | Quality payload (20 bytes, little-endian integers) |
+| --- | --- |
+| 0 | Version 1 |
+| 1 | Reason: 0 collecting, 1 timing gap, 2 non-monotonic time, 3 dark, 4 clipped, 5 low amplitude, 6 poor spectral concentration, 7 competing peaks, 8 out-of-range rate, 9 poor periodicity, 10 confirming, 11 qualified |
+| 2 / 3 | Filled grid samples (0–80) / last candidate BPM (saturated at 255) |
+| 4–5 / 6–7 | Timing-history resets / invalid optical samples, saturating counters |
+| 8–9 / 10–11 | Analysed windows / qualified readings, saturating counters |
+| 12–13 | Last window's raw ADC peak-to-peak range, not pulse amplitude |
+| 14–15 | Spectral peak/mean concentration multiplied by 100 (minimum 300) |
+| 16–17 | Delayed waveform similarity on 0–10000 scale (minimum 6500) |
+| 18 / 19 | Consistent-candidate count / last input interval in ms (saturated at 255) |
+
+Counters reset only when starting a new measurement. Invalid input and timing
+resets clear the window and candidate history but preserve counters. Zero
+spectral/similarity values can mean that an earlier check rejected the window;
+read the reason first. Current reason/counters also appear in host replay output.
+If physical tests still fail, report the Pulse page text and these 20 bytes after
+about 15 seconds, alongside raw-v3 data or a full notification trace. The prior
+Furu HR subscription now demonstrably delivers zero/valid payloads, so this
+iteration remains entirely within Kongle while Furu UI work proceeds separately.

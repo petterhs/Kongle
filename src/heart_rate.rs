@@ -10,6 +10,76 @@ const ADC_CLIP: u32 = 0x7ff8;
 const WINDOW_SAMPLES: usize = (8000 / SAMPLE_MS) as usize;
 include!("heart_rate_coefficients.rs");
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Reason {
+    WarmingUp = 0,
+    TimingGap = 1,
+    NonMonotonic = 2,
+    Dark = 3,
+    Clipped = 4,
+    LowAmplitude = 5,
+    PoorSpectrum = 6,
+    Ambiguous = 7,
+    OutOfRange = 8,
+    NotPeriodic = 9,
+    Confirming = 10,
+    Valid = 11,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Quality {
+    pub reason: Reason,
+    pub filled: u8,
+    pub candidate: u8,
+    pub timing_resets: u16,
+    pub invalid_samples: u16,
+    pub analyses: u16,
+    pub qualified: u16,
+    pub amplitude: u16,
+    pub concentration: u16,
+    pub similarity: u16,
+    pub confirmation: u8,
+    pub interval_ms: u8,
+}
+impl Quality {
+    pub const EMPTY: Self = Self {
+        reason: Reason::WarmingUp,
+        filled: 0,
+        candidate: 0,
+        timing_resets: 0,
+        invalid_samples: 0,
+        analyses: 0,
+        qualified: 0,
+        amplitude: 0,
+        concentration: 0,
+        similarity: 0,
+        confirmation: 0,
+        interval_ms: 0,
+    };
+    pub fn encode(self) -> [u8; 20] {
+        let mut out = [0; 20];
+        out[..4].copy_from_slice(&[1, self.reason as u8, self.filled, self.candidate]);
+        for (i, value) in [
+            self.timing_resets,
+            self.invalid_samples,
+            self.analyses,
+            self.qualified,
+            self.amplitude,
+            self.concentration,
+            self.similarity,
+        ]
+        .iter()
+        .enumerate()
+        {
+            out[4 + i * 2..6 + i * 2].copy_from_slice(&value.to_le_bytes());
+        }
+        out[18] = self.confirmation;
+        out[19] = self.interval_ms;
+        out
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Diagnostics {
     pub ppg: u32,
@@ -20,6 +90,7 @@ pub struct Diagnostics {
     pub at_ms: u64,
     pub error: u8,
     pub gain: u8,
+    pub quality: Quality,
 }
 
 impl Diagnostics {
@@ -32,6 +103,7 @@ impl Diagnostics {
         at_ms: 0,
         error: 0,
         gain: 1,
+        quality: Quality::EMPTY,
     };
 
     /// Version, phase, live BPM, last error, gain/count LE, PPG/ALS u32 LE,
@@ -185,11 +257,14 @@ impl RateConfirmation {
 /// search plus delayed waveform validation, rather than individual peak counts.
 /// Ordinary least-squares detrending and windowing use integer arithmetic only.
 pub struct Estimator {
-    raw: [u16; WINDOW_SAMPLES],
+    raw: [i32; WINDOW_SAMPLES],
     times: [u16; WINDOW_SAMPLES],
     cursor: usize,
     count: usize,
     previous_ms: Option<u64>,
+    previous_ppg: i32,
+    next_grid_ms: u64,
+    quality: Quality,
     next_analysis_ms: u64,
     confirmation: RateConfirmation,
 }
@@ -202,6 +277,9 @@ impl Estimator {
             cursor: 0,
             count: 0,
             previous_ms: None,
+            previous_ppg: 0,
+            next_grid_ms: 0,
+            quality: Quality::EMPTY,
             next_analysis_ms: 0,
             confirmation: RateConfirmation::new(),
         }
@@ -255,13 +333,71 @@ impl Estimator {
             .max(0) as u64
     }
 
-    fn estimate(&self) -> Option<u8> {
+    pub fn quality(&self) -> Quality {
+        self.quality
+    }
+
+    fn reject(&mut self, reason: Reason) -> Option<u8> {
+        self.quality.reason = reason;
+        None
+    }
+
+    // Zero-phase 0.35 Hz Butterworth high-pass (Q=1/sqrt(2)), then
+    // a 4 Hz low-pass in each direction. Q8 states / Q30 HP coefficients.
+    // Biquad formulas: https://www.w3.org/TR/audio-eq-cookbook/#hpf
+    // A flat passband avoids suppressing the low-rate fundamental in favor
+    // of its second harmonic. No sensor/LED gain is changed.
+    fn bandpass(wave: &mut [i16; WINDOW_SAMPLES]) {
+        const B0: i64 = 919048486;
+        const B1: i64 = -1838096971;
+        const B2: i64 = 919048486;
+        const A1: i64 = -1815693534;
+        const A2: i64 = 786758584;
+        const LP: i64 = 30114; // 1 - exp(-2*pi*4*0.1), Q15.
+        for backwards in [false, true] {
+            let edge = if backwards { WINDOW_SAMPLES - 1 } else { 0 };
+            let mut x1 = i64::from(wave[edge]) * 256;
+            let mut x2 = x1;
+            let (mut y1, mut y2) = (0i64, 0i64);
+            for step in 0..WINDOW_SAMPLES {
+                let index = if backwards {
+                    WINDOW_SAMPLES - 1 - step
+                } else {
+                    step
+                };
+                let x = i64::from(wave[index]) * 256;
+                let y = (B0 * x + B1 * x1 + B2 * x2 - A1 * y1 - A2 * y2) / (1 << 30);
+                x2 = x1;
+                x1 = x;
+                y2 = y1;
+                y1 = y;
+                wave[index] = (y / 256).clamp(-32767, 32767) as i16;
+            }
+            let edge = if backwards { WINDOW_SAMPLES - 1 } else { 0 };
+            let mut state = i64::from(wave[edge]) * 256;
+            for step in 0..WINDOW_SAMPLES {
+                let index = if backwards {
+                    WINDOW_SAMPLES - 1 - step
+                } else {
+                    step
+                };
+                state += LP * (i64::from(wave[index]) * 256 - state) / 32768;
+                wave[index] = (state / 256).clamp(-32767, 32767) as i16;
+            }
+        }
+    }
+
+    fn estimate(&mut self) -> Option<u8> {
+        self.quality.analyses = self.quality.analyses.saturating_add(1);
+        self.quality.candidate = 0;
+        self.quality.concentration = 0;
+        self.quality.similarity = 0;
         let mut wave = [0i16; WINDOW_SAMPLES];
         let mut sum = 0i64;
         let mut covariance = 0i64;
         let mut x_energy = 0i64;
-        let mut min = u16::MAX;
-        let mut max = 0u16;
+        let mut min = i32::MAX;
+        let mut max = 0i32;
         for i in 0..WINDOW_SAMPLES {
             let raw = self.raw[(self.cursor + i) % WINDOW_SAMPLES];
             let x = 2 * i as i64 - (WINDOW_SAMPLES - 1) as i64;
@@ -271,37 +407,48 @@ impl Estimator {
             min = min.min(raw);
             max = max.max(raw);
         }
-        // Keep the old estimator's minimum observable pulse swing; gain is
-        // fixed for this acquisition experiment, so no amplification of noise.
-        if max - min < 16 {
-            return None;
+        self.quality.amplitude = ((max - min) / 256).min(i32::from(u16::MAX)) as u16;
+        if max - min < 2 * 256 {
+            return self.reject(Reason::LowAmplitude);
         }
         // A good burst retained in an old part of the window must not keep
         // producing fresh readings after the optical waveform has gone flat.
         for quarter in 0..4 {
-            let mut low = u16::MAX;
-            let mut high = 0u16;
+            let mut low = i32::MAX;
+            let mut high = 0i32;
             for i in quarter * (WINDOW_SAMPLES / 4)..(quarter + 1) * (WINDOW_SAMPLES / 4) {
                 let raw = self.raw[(self.cursor + i) % WINDOW_SAMPLES];
                 low = low.min(raw);
                 high = high.max(raw);
             }
-            if high - low < 16 {
-                return None;
+            if high - low < 2 * 256 {
+                return self.reject(Reason::LowAmplitude);
             }
         }
-        for (i, value) in wave.iter_mut().enumerate() {
+        // Normalize only for numeric precision. All quality metrics remain
+        // relative to the measured waveform, never a claim of optical gain.
+        let residual = |i: usize| {
             let raw = i64::from(self.raw[(self.cursor + i) % WINDOW_SAMPLES]);
             let x = 2 * i as i64 - (WINDOW_SAMPLES - 1) as i64;
-            *value = (raw - sum / WINDOW_SAMPLES as i64 - covariance * x / x_energy)
-                .clamp(-32767, 32767) as i16;
+            raw - sum / WINDOW_SAMPLES as i64 - covariance * x / x_energy
+        };
+        let scale = (0..WINDOW_SAMPLES)
+            .map(|i| residual(i).abs())
+            .max()
+            .unwrap_or(0);
+        if scale == 0 {
+            return self.reject(Reason::LowAmplitude);
         }
+        for (i, value) in wave.iter_mut().enumerate() {
+            *value = (residual(i) * 4096 / scale) as i16;
+        }
+        Self::bandpass(&mut wave);
         let first = self.times[self.cursor];
         let last = self.times[(self.cursor + WINDOW_SAMPLES - 1) % WINDOW_SAMPLES];
         let span_ms = u32::from(last.wrapping_sub(first));
         // A zero/invalid time span must never yield a plausible rate.
         if span_ms == 0 {
-            return None;
+            return self.reject(Reason::NonMonotonic);
         }
         // Hann-windowed Goertzel bank at 1 BPM grid spacing. Grid spacing is
         // not an accuracy claim. A broader 20..280 range lets out-of-policy
@@ -321,8 +468,10 @@ impl Estimator {
                 peak_bpm = index as u32 + 20;
             }
         }
+        self.quality.concentration = (peak_energy * COEFFICIENTS.len() as u64 * 100 / total.max(1))
+            .min(u64::from(u16::MAX)) as u16;
         if peak_energy == 0 || peak_energy * (COEFFICIENTS.len() as u64) < total * 3 {
-            return None;
+            return self.reject(Reason::PoorSpectrum);
         }
         // Reject competing frequency peaks rather than choosing a rate from
         // an ambiguous waveform. No stored spectrum or heap allocation.
@@ -331,43 +480,117 @@ impl Estimator {
             if bpm.abs_diff(peak_bpm) > 15
                 && Self::frequency_energy(&windowed, *coefficient) * 5 > peak_energy * 4
             {
-                return None;
+                return self.reject(Reason::Ambiguous);
             }
         }
         let corrected_bpm =
             (peak_bpm * (WINDOW_SAMPLES - 1) as u32 * SAMPLE_MS as u32 + span_ms / 2) / span_ms;
-        if !(30..=220).contains(&corrected_bpm)
-            || Self::similarity(&wave, (60_000 / peak_bpm) as usize) < 6500
-        {
-            return None;
+        self.quality.candidate = corrected_bpm.min(255) as u8;
+        if !(30..=220).contains(&corrected_bpm) {
+            return self.reject(Reason::OutOfRange);
+        }
+        self.quality.similarity =
+            Self::similarity(&wave, (60_000 / peak_bpm) as usize).clamp(0, 10000) as u16;
+        if self.quality.similarity < 6500 {
+            return self.reject(Reason::NotPeriodic);
         }
         Some(corrected_bpm as u8)
     }
 
-    pub fn sample(&mut self, ppg: u32, ambient: u32, now_ms: u64) -> Option<u8> {
-        if ppg <= 8
-            || ppg >= ADC_CLIP
-            || ambient >= ADC_CLIP
-            || self.previous_ms.is_some_and(|at| {
-                now_ms <= at || now_ms - at < SAMPLE_MS - 20 || now_ms - at > SAMPLE_MS + 20
-            })
-        {
-            *self = Self::new();
-            return None;
-        }
-        self.previous_ms = Some(now_ms);
-        self.raw[self.cursor] = ppg as u16;
-        self.times[self.cursor] = now_ms as u16;
+    fn clear_history(&mut self, reason: Reason) {
+        let mut quality = self.quality;
+        quality.reason = reason;
+        quality.filled = 0;
+        quality.candidate = 0;
+        quality.confirmation = 0;
+        quality.amplitude = 0;
+        quality.concentration = 0;
+        quality.similarity = 0;
+        *self = Self::new();
+        self.quality = quality;
+    }
+
+    fn push(&mut self, ppg: i32, at: u64) {
+        self.raw[self.cursor] = ppg;
+        self.times[self.cursor] = at as u16;
         self.cursor = (self.cursor + 1) % WINDOW_SAMPLES;
         self.count = (self.count + 1).min(WINDOW_SAMPLES);
-        if self.count < WINDOW_SAMPLES || now_ms < self.next_analysis_ms {
+        self.quality.filled = self.count as u8;
+    }
+
+    pub fn sample(&mut self, ppg: u32, ambient: u32, now_ms: u64) -> Option<u8> {
+        if ppg <= 8 || ppg >= ADC_CLIP || ambient >= ADC_CLIP {
+            self.quality.invalid_samples = self.quality.invalid_samples.saturating_add(1);
+            self.clear_history(if ppg <= 8 {
+                Reason::Dark
+            } else {
+                Reason::Clipped
+            });
+            return None;
+        }
+        let ppg_q8 = (ppg as i32) * 256;
+        if let Some(previous) = self.previous_ms {
+            if now_ms <= previous || now_ms - previous > 180 {
+                self.quality.timing_resets = self.quality.timing_resets.saturating_add(1);
+                self.quality.interval_ms = now_ms.saturating_sub(previous).min(255) as u8;
+                self.clear_history(if now_ms <= previous {
+                    Reason::NonMonotonic
+                } else {
+                    Reason::TimingGap
+                });
+                if now_ms <= previous {
+                    return None;
+                }
+            } else {
+                let interval = now_ms - previous;
+                self.quality.interval_ms = interval.min(255) as u8;
+                // Only bridge bounded scheduling jitter. Never fill a missing
+                // 200 ms sample or stretch an old window over a disconnection.
+                while self.next_grid_ms <= now_ms {
+                    let offset = self.next_grid_ms - previous;
+                    let interpolated = i64::from(self.previous_ppg)
+                        + i64::from(ppg_q8 - self.previous_ppg) * offset as i64 / interval as i64;
+                    self.push(interpolated as i32, self.next_grid_ms);
+                    self.next_grid_ms += SAMPLE_MS;
+                }
+            }
+        }
+        if self.previous_ms.is_none() {
+            self.push(ppg_q8, now_ms);
+            self.next_grid_ms = now_ms + SAMPLE_MS;
+        }
+        self.previous_ms = Some(now_ms);
+        self.previous_ppg = ppg_q8;
+        if self.count < WINDOW_SAMPLES {
+            if !matches!(
+                self.quality.reason,
+                Reason::TimingGap | Reason::NonMonotonic
+            ) {
+                self.quality.reason = Reason::WarmingUp;
+            }
+            return None;
+        }
+        if now_ms < self.next_analysis_ms {
             return None;
         }
         self.next_analysis_ms = now_ms + 1000;
         match self.estimate() {
-            Some(bpm) => self.confirmation.candidate(bpm, now_ms),
+            Some(bpm) => {
+                let result = self.confirmation.candidate(bpm, now_ms);
+                self.quality.confirmation = self.confirmation.count;
+                self.quality.reason = if result.is_some() {
+                    Reason::Valid
+                } else {
+                    Reason::Confirming
+                };
+                if result.is_some() {
+                    self.quality.qualified = self.quality.qualified.saturating_add(1);
+                }
+                result
+            }
             None => {
                 self.confirmation = RateConfirmation::new();
+                self.quality.confirmation = 0;
                 None
             }
         }

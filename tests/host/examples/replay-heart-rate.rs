@@ -1,5 +1,5 @@
 //! Replay numeric CSV from scripts/hr-diagnostics-to-csv.py through the actual
-//! firmware estimator. Input is not interpolated across missing samples.
+//! firmware estimator. Small scheduling jitter is resampled; real gaps reset.
 #[allow(dead_code)]
 #[path = "../../../src/heart_rate.rs"]
 mod heart_rate;
@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut current = None;
     let mut samples = 0;
     let mut readings = 0;
-    println!("session,sample,elapsed_ms,replayed_bpm");
+    println!("session,sample,elapsed_ms,replayed_bpm,reason,filled,timing_resets,analyses,concentration,similarity");
     for line in lines.filter(|line| !line.trim().is_empty()) {
         let fields: Vec<_> = line.split(',').collect();
         let value = |index: usize| -> Result<u64, Box<dyn Error>> {
@@ -52,10 +52,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             current = Some((session, gain));
         }
         samples += 1;
-        if let Some(bpm) = estimator.sample(ppg, ambient, elapsed) {
+        let result = estimator.sample(ppg, ambient, elapsed);
+        if result.is_some() {
             readings += 1;
-            println!("{session},{count},{elapsed},{bpm}");
         }
+        let quality = estimator.quality();
+        let bpm = result.map(|bpm| bpm.to_string()).unwrap_or_default();
+        println!(
+            "{session},{count},{elapsed},{bpm},{:?},{},{},{},{},{}",
+            quality.reason,
+            quality.filled,
+            quality.timing_resets,
+            quality.analyses,
+            quality.concentration,
+            quality.similarity
+        );
     }
     eprintln!("Replayed {samples} samples, {readings} qualified readings; expected cadence {} ms. Gaps reset history.", heart_rate::SAMPLE_MS);
     Ok(())

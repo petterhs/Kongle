@@ -57,6 +57,9 @@ struct HeartRateService {
     location: u8,
     #[characteristic(uuid = "6b6f180d-1886-4b40-ae7d-00a11ce50001", read, notify)]
     diagnostics: [u8; 20],
+    // Appended after existing handles: raw v3 diagnostic format stays stable.
+    #[characteristic(uuid = "6b6f180d-1886-4b40-ae7d-00a11ce50002", read)]
+    quality: [u8; 20],
 }
 
 /// InfiniTime step-count field, u32 little-endian. Daily total is valid only
@@ -366,6 +369,17 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                     GattConnectionEvent::Gatt { event } => {
                         let mut dfu_reply = None;
                         let error = match &event {
+                            GattEvent::Read(read)
+                                if read.handle() == server.heart_rate.quality.handle =>
+                            {
+                                let diagnostics = crate::HEART_DIAGNOSTICS
+                                    .try_get()
+                                    .unwrap_or(crate::heart_rate::Diagnostics::EMPTY);
+                                server
+                                    .set(&server.heart_rate.quality, &diagnostics.quality.encode())
+                                    .err()
+                                    .map(|_| AttErrorCode::UNLIKELY_ERROR)
+                            }
                             GattEvent::Read(read)
                                 if read.handle() == server.heart_rate.diagnostics.handle =>
                             {

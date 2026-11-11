@@ -134,6 +134,64 @@ fn pulse_updates_preserve_panel_and_button_borders_and_fit_both_languages() {
 }
 
 #[test]
+fn pulse_quality_messages_fit_without_redrawing_the_panel_in_both_languages() {
+    use crate::heart_rate::{Phase, Quality, Reason, State};
+    for norwegian in [false, true] {
+        let mut ui = WatchUi::new();
+        if norwegian {
+            ui.handle_touch(TouchEvent::SwipeUp);
+            ui.handle_touch(TouchEvent::Tap { x: 50, y: 160 });
+            ui.handle_touch(TouchEvent::Tap { x: 50, y: 120 });
+            ui.show_clock();
+        }
+        ui.handle_touch(TouchEvent::Tap { x: 170, y: 180 });
+        ui.set_heart(
+            State {
+                phase: Phase::Measuring,
+                ..State::EMPTY
+            },
+            1000,
+        );
+        let mut frame = Frame::new();
+        render(&mut ui, &mut frame);
+        let before = frame.pixels.clone();
+        for reason in [
+            Reason::WarmingUp,
+            Reason::TimingGap,
+            Reason::NonMonotonic,
+            Reason::Dark,
+            Reason::Clipped,
+            Reason::LowAmplitude,
+            Reason::PoorSpectrum,
+            Reason::Ambiguous,
+            Reason::OutOfRange,
+            Reason::NotPeriodic,
+            Reason::Confirming,
+            Reason::Valid,
+        ] {
+            ui.set_heart_quality(Quality {
+                reason,
+                filled: 80,
+                confirmation: 3,
+                ..Quality::EMPTY
+            });
+            ui.draw_heart(&mut frame);
+            assert_eq!(frame.clipped, 0, "{reason:?}, norwegian={norwegian}");
+            for (index, (old, new)) in before.iter().zip(&frame.pixels).enumerate() {
+                let x = index % 240;
+                let y = index / 240;
+                let field = (18..222).contains(&x)
+                    && [40..68, 76..104, 108..136].iter().any(|r| r.contains(&y));
+                let button = (28..208).contains(&x) && (158..186).contains(&y);
+                if !field && !button {
+                    assert_eq!(old, new, "{reason:?} overwrote {x},{y}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn live_steps_only_redraw_their_region_and_never_overwrite_media() {
     let mut ui = WatchUi::new();
     let mut frame = Frame::new();
