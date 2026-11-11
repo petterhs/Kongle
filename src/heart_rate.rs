@@ -8,6 +8,10 @@ pub const FRESH_MS: u64 = 30_000;
 // 15-bit / 10 Hz reference acquisition. These are not accuracy guarantees.
 const ADC_CLIP: u32 = 0x7ff8;
 const WINDOW_SAMPLES: usize = (8000 / SAMPLE_MS) as usize;
+const MIN_SIMILARITY: u16 = 5500;
+const MARGINAL_CONCENTRATION: u16 = 1000; // Weak periodicity needs >=10x peak/mean.
+const MAX_BRIDGE_MS: u64 = 250;
+const MAX_UNCERTAIN_SAMPLES: usize = 4; // At most 5% of an eight-second window.
 include!("heart_rate_coefficients.rs");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +29,8 @@ pub enum Reason {
     NotPeriodic = 9,
     Confirming = 10,
     Valid = 11,
+    InsufficientCoverage = 12,
+    AmbientClipped = 13,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,6 +257,14 @@ impl RateConfirmation {
         self.last_ms = now_ms;
         (self.count >= 4 && now_ms.saturating_sub(self.first_ms) >= 3000).then_some(bpm)
     }
+
+    /// One marginal window may interrupt progress, but never produces a
+    /// reading. Multiple failures expire evidence; a rate jump still resets.
+    pub fn miss(&mut self, now_ms: u64) {
+        if now_ms <= self.last_ms || now_ms - self.last_ms > 2500 {
+            *self = Self::new();
+        }
+    }
 }
 
 /// Fixed-size window estimator. Independently implemented Goertzel frequency
@@ -258,6 +272,7 @@ impl RateConfirmation {
 /// Ordinary least-squares detrending and windowing use integer arithmetic only.
 pub struct Estimator {
     raw: [i32; WINDOW_SAMPLES],
+    uncertain: [bool; WINDOW_SAMPLES],
     times: [u16; WINDOW_SAMPLES],
     cursor: usize,
     count: usize,
@@ -273,6 +288,7 @@ impl Estimator {
     pub const fn new() -> Self {
         Self {
             raw: [0; WINDOW_SAMPLES],
+            uncertain: [false; WINDOW_SAMPLES],
             times: [0; WINDOW_SAMPLES],
             cursor: 0,
             count: 0,
@@ -392,6 +408,15 @@ impl Estimator {
         self.quality.candidate = 0;
         self.quality.concentration = 0;
         self.quality.similarity = 0;
+        if self
+            .uncertain
+            .iter()
+            .filter(|uncertain| **uncertain)
+            .count()
+            > MAX_UNCERTAIN_SAMPLES
+        {
+            return self.reject(Reason::InsufficientCoverage);
+        }
         let mut wave = [0i16; WINDOW_SAMPLES];
         let mut sum = 0i64;
         let mut covariance = 0i64;
@@ -491,8 +516,11 @@ impl Estimator {
         }
         self.quality.similarity =
             Self::similarity(&wave, (60_000 / peak_bpm) as usize).clamp(0, 10000) as u16;
-        if self.quality.similarity < 6500 {
+        if self.quality.similarity < MIN_SIMILARITY {
             return self.reject(Reason::NotPeriodic);
+        }
+        if self.quality.similarity < 6500 && self.quality.concentration < MARGINAL_CONCENTRATION {
+            return self.reject(Reason::PoorSpectrum);
         }
         Some(corrected_bpm as u8)
     }
@@ -510,8 +538,9 @@ impl Estimator {
         self.quality = quality;
     }
 
-    fn push(&mut self, ppg: i32, at: u64) {
+    fn push(&mut self, ppg: i32, at: u64, uncertain: bool) {
         self.raw[self.cursor] = ppg;
+        self.uncertain[self.cursor] = uncertain;
         self.times[self.cursor] = at as u16;
         self.cursor = (self.cursor + 1) % WINDOW_SAMPLES;
         self.count = (self.count + 1).min(WINDOW_SAMPLES);
@@ -521,7 +550,9 @@ impl Estimator {
     pub fn sample(&mut self, ppg: u32, ambient: u32, now_ms: u64) -> Option<u8> {
         if ppg <= 8 || ppg >= ADC_CLIP || ambient >= ADC_CLIP {
             self.quality.invalid_samples = self.quality.invalid_samples.saturating_add(1);
-            self.clear_history(if ppg <= 8 {
+            self.clear_history(if ambient >= ADC_CLIP {
+                Reason::AmbientClipped
+            } else if ppg <= 8 {
                 Reason::Dark
             } else {
                 Reason::Clipped
@@ -530,7 +561,7 @@ impl Estimator {
         }
         let ppg_q8 = (ppg as i32) * 256;
         if let Some(previous) = self.previous_ms {
-            if now_ms <= previous || now_ms - previous > 180 {
+            if now_ms <= previous || now_ms - previous > MAX_BRIDGE_MS {
                 self.quality.timing_resets = self.quality.timing_resets.saturating_add(1);
                 self.quality.interval_ms = now_ms.saturating_sub(previous).min(255) as u8;
                 self.clear_history(if now_ms <= previous {
@@ -544,19 +575,19 @@ impl Estimator {
             } else {
                 let interval = now_ms - previous;
                 self.quality.interval_ms = interval.min(255) as u8;
-                // Only bridge bounded scheduling jitter. Never fill a missing
-                // 200 ms sample or stretch an old window over a disconnection.
+                // Bridge only brief stalls; mark every point crossing a long
+                // interval so an analysis cannot be dominated by interpolation.
                 while self.next_grid_ms <= now_ms {
                     let offset = self.next_grid_ms - previous;
                     let interpolated = i64::from(self.previous_ppg)
                         + i64::from(ppg_q8 - self.previous_ppg) * offset as i64 / interval as i64;
-                    self.push(interpolated as i32, self.next_grid_ms);
+                    self.push(interpolated as i32, self.next_grid_ms, interval > 180);
                     self.next_grid_ms += SAMPLE_MS;
                 }
             }
         }
         if self.previous_ms.is_none() {
-            self.push(ppg_q8, now_ms);
+            self.push(ppg_q8, now_ms, false);
             self.next_grid_ms = now_ms + SAMPLE_MS;
         }
         self.previous_ms = Some(now_ms);
@@ -564,7 +595,11 @@ impl Estimator {
         if self.count < WINDOW_SAMPLES {
             if !matches!(
                 self.quality.reason,
-                Reason::TimingGap | Reason::NonMonotonic
+                Reason::TimingGap
+                    | Reason::NonMonotonic
+                    | Reason::Dark
+                    | Reason::Clipped
+                    | Reason::AmbientClipped
             ) {
                 self.quality.reason = Reason::WarmingUp;
             }
@@ -589,8 +624,15 @@ impl Estimator {
                 result
             }
             None => {
-                self.confirmation = RateConfirmation::new();
-                self.quality.confirmation = 0;
+                if self.quality.reason == Reason::NotPeriodic
+                    && self.quality.similarity >= 5000
+                    && self.quality.concentration >= MARGINAL_CONCENTRATION
+                {
+                    self.confirmation.miss(now_ms);
+                } else {
+                    self.confirmation = RateConfirmation::new();
+                }
+                self.quality.confirmation = self.confirmation.count;
                 None
             }
         }

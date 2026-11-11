@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract Kongle version-3 optical diagnostics from a chronological text log.
+"""Extract Kongle version-3 optical diagnostics from nRF text or Furu JSON.
 
 Accepts nRF Connect's hyphenated or space-separated 20-byte payloads. Old
 diagnostic versions have different timestamp semantics and are not guessed.
@@ -8,6 +8,7 @@ Only measuring frames are exported. Lost samples remain gaps, never fillers.
 
 import argparse
 import csv
+import json
 import re
 import struct
 import sys
@@ -34,6 +35,23 @@ def decode(payload: bytes) -> dict | None:
 
 
 def extract(text: str) -> list[dict]:
+    if text.lstrip().startswith("{"):
+        capture = json.loads(text)
+        if capture.get("version") != 1 or not isinstance(capture.get("samples"), list):
+            raise ValueError("unsupported Furu capture format")
+        frames = []
+        for sample in capture["samples"]:
+            if not isinstance(sample, dict) or sample.get("source") != "diagnostics":
+                continue
+            payload = sample.get("bytes")
+            if not isinstance(payload, list) or len(payload) != 20:
+                continue
+            if not all(type(value) is int and 0 <= value <= 255 for value in payload):
+                continue
+            frames.append(bytes(payload).hex("-"))
+        # Keep the same decoder, session splitting and deduplication as text.
+        # Device address and wall-clock metadata are deliberately not exported.
+        text = "\n".join(frames)
     rows = []
     previous = None
     session = 1
@@ -65,7 +83,10 @@ def main() -> int:
     parser.add_argument("log", type=Path)
     parser.add_argument("--output", type=Path, help="CSV destination (default stdout)")
     args = parser.parse_args()
-    rows = extract(args.log.read_text(encoding="utf-8-sig", errors="replace"))
+    try:
+        rows = extract(args.log.read_text(encoding="utf-8-sig", errors="replace"))
+    except ValueError as error:
+        parser.error(str(error))
     if not rows:
         parser.error("no measuring version-3 diagnostic frames; enable the custom diagnostic notifications, not only 0x2a37")
     stream = args.output.open("w", newline="", encoding="utf-8") if args.output else sys.stdout

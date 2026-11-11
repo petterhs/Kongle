@@ -391,6 +391,12 @@ impl WatchUi {
                         Reason::Clipped => {
                             let _ = age.push_str(self.tr("Signal saturated", "Signal mettet"));
                         }
+                        Reason::AmbientClipped => {
+                            let _ = age.push_str(self.tr("Too much light", "For mye lys"));
+                        }
+                        Reason::InsufficientCoverage => {
+                            let _ = age.push_str(self.tr("Sampling unstable", "Ustabil sampling"));
+                        }
                         Reason::LowAmplitude => {
                             let _ = age.push_str(self.tr("Signal too weak", "For svakt signal"));
                         }

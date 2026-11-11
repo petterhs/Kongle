@@ -1,6 +1,146 @@
 use crate::heart_rate::{Estimator, Phase, Reading, State, MAX_MEASUREMENT_MS, SAMPLE_MS};
 
 #[test]
+fn captured_weak_optical_trace_recovers_earlier_without_rate_doubling() {
+    // Anonymized capture from Furu, 2026-11-11. These are optical samples,
+    // not an independent ground-truth pulse measurement. Avoid overfitting
+    // the exact rate; require continuity and no implausible harmonic jumps.
+    let mut estimator = Estimator::new();
+    let mut state = State {
+        phase: Phase::Measuring,
+        ..State::EMPTY
+    };
+    let mut first = None;
+    let mut qualified = 0;
+    let mut coverage_ms = 0;
+    let mut previous = None;
+    for row in include_str!("../../fixtures/hr-weak-optical.csv")
+        .lines()
+        .skip(1)
+    {
+        let values: Vec<u64> = row.split(',').map(|value| value.parse().unwrap()).collect();
+        let at = values[0];
+        if let Some(previous) = previous {
+            if state.bpm(previous).is_some() {
+                coverage_ms += at - previous;
+            }
+        }
+        if let Some(bpm) = estimator.sample(values[1] as u32, values[2] as u32, at) {
+            assert!((55..=85).contains(&bpm), "unexpected jump: {bpm}");
+            first.get_or_insert(at);
+            qualified += 1;
+            state.last = Some(Reading { bpm, at_ms: at });
+        }
+        previous = Some(at);
+    }
+    assert!(first.unwrap() <= 14000, "{first:?}");
+    assert!(qualified >= 30, "{qualified}");
+    assert!(coverage_ms >= 31000, "{coverage_ms}");
+    assert_eq!(estimator.quality().timing_resets, 0);
+}
+
+#[test]
+fn confirmation_survives_one_marginal_miss_but_expires_and_rechecks_rate() {
+    use crate::heart_rate::RateConfirmation;
+    let mut confirmation = RateConfirmation::new();
+    assert_eq!(confirmation.candidate(70, 1000), None);
+    assert_eq!(confirmation.candidate(70, 2000), None);
+    confirmation.miss(3000);
+    assert_eq!(confirmation.candidate(70, 4000), None); // Still requires 4 good candidates.
+    assert_eq!(confirmation.candidate(71, 5000), Some(71));
+    confirmation.miss(6000);
+    confirmation.miss(7000);
+    confirmation.miss(8000);
+    assert_eq!(confirmation.candidate(70, 9000), None);
+    assert_eq!(confirmation.candidate(140, 10000), None); // A jump is never inherited.
+}
+
+#[test]
+fn occasional_short_stalls_keep_the_window_but_long_or_dense_gaps_are_rejected() {
+    use crate::heart_rate::Reason;
+    for bpm in [40, 72, 160, 220] {
+        for isolated in [false, true] {
+            let mut estimator = Estimator::new();
+            let mut readings = Vec::new();
+            for index in 0..450 {
+                let now = index * SAMPLE_MS
+                    + if isolated {
+                        if index >= 200 {
+                            150
+                        } else {
+                            0
+                        }
+                    } else if index % 50 == 25 {
+                        85
+                    } else {
+                        0
+                    };
+                let raw = (7000.0
+                    + 200.0 * (now as f64 * f64::from(bpm) / 60000.0 * std::f64::consts::TAU).sin())
+                    as u32;
+                if let Some(found) = estimator.sample(raw, 6, now) {
+                    readings.push((now, found));
+                }
+            }
+            assert!(
+                readings.len() >= 20,
+                "{bpm}, isolated={isolated}: {readings:?}"
+            );
+            assert!(readings
+                .iter()
+                .all(|(_, found)| (i32::from(*found) - bpm).abs() <= (bpm / 20).max(3)));
+            assert_eq!(estimator.quality().timing_resets, 0);
+            if isolated {
+                let recovered = readings.iter().find(|(at, _)| *at >= 20150).unwrap().0;
+                assert!(recovered <= 23150, "recovery at {recovered}");
+            }
+        }
+    }
+    let mut estimator = Estimator::new();
+    for index in 0..450 {
+        let now = index * SAMPLE_MS + if index % 10 == 5 { 85 } else { 0 };
+        let raw =
+            (7000.0 + 200.0 * (now as f64 * 72.0 / 60000.0 * std::f64::consts::TAU).sin()) as u32;
+        assert_eq!(estimator.sample(raw, 6, now), None);
+    }
+    assert_eq!(estimator.quality().reason, Reason::InsufficientCoverage);
+    assert_eq!(estimator.quality().filled, 80); // Window retained, not endlessly refilled.
+    assert_eq!(estimator.quality().timing_resets, 0);
+    estimator.sample(7000, 6, 46000);
+    assert_eq!(estimator.quality().reason, Reason::TimingGap);
+    assert_eq!(estimator.quality().filled, 1);
+}
+
+#[test]
+fn ambient_and_ppg_saturation_are_distinct_and_do_not_disappear_as_warmup() {
+    use crate::heart_rate::Reason;
+    let mut estimator = Estimator::new();
+    for index in 0..450 {
+        let now = index * SAMPLE_MS;
+        let raw =
+            (30000.0 + 3000.0 * (now as f64 * 72.0 / 60000.0 * std::f64::consts::TAU).sin()) as u32;
+        assert_eq!(estimator.sample(raw, 6, now), None);
+    }
+    assert_eq!(estimator.quality().reason, Reason::Clipped);
+    assert!(estimator.quality().invalid_samples > 0);
+    estimator.sample(7000, 32760, 45000);
+    assert_eq!(estimator.quality().reason, Reason::AmbientClipped);
+    estimator.sample(7000, 6, 45100);
+    assert_eq!(estimator.quality().reason, Reason::AmbientClipped);
+    let mut recovered = 0;
+    for index in 452..750 {
+        let now = index * SAMPLE_MS;
+        let raw =
+            (7000.0 + 200.0 * (now as f64 * 72.0 / 60000.0 * std::f64::consts::TAU).sin()) as u32;
+        if let Some(bpm) = estimator.sample(raw, 6, now) {
+            assert!((70..=74).contains(&bpm));
+            recovered += 1;
+        }
+    }
+    assert!(recovered > 10);
+}
+
+#[test]
 fn review_regressions_keep_pulse_under_drift_jitter_and_changing_amplitude() {
     for case in [
         "clean",
@@ -55,6 +195,23 @@ fn weak_quantization_noise_and_slow_drift_alone_do_not_become_pulse() {
                 estimator.sample(859 + random % 5, 6, i * SAMPLE_MS),
                 None,
                 "seed {seed}"
+            );
+        }
+    }
+    // Filtered/temporally correlated noise is harder than independent ADC
+    // noise. Marginal periodicity must not bypass spectral evidence.
+    for seed in 1u32..=16 {
+        let mut estimator = Estimator::new();
+        let mut random = seed;
+        let mut colored = 0i32;
+        for i in 0..450 {
+            random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+            let white = (random % 1000) as i32 - 500;
+            colored += (white - colored) / 2;
+            assert_eq!(
+                estimator.sample((7000 + colored) as u32, 6, i * SAMPLE_MS),
+                None,
+                "colored seed {seed}"
             );
         }
     }
@@ -213,7 +370,7 @@ fn reference_adc_range_timestamp_wrap_and_missing_samples_are_handled() {
     }
     assert!(readings.len() > 5);
     assert!(readings.iter().all(|bpm| (70..=74).contains(bpm)));
-    let gap_at = 65000 + 301 * SAMPLE_MS;
+    let gap_at = 65000 + 303 * SAMPLE_MS;
     assert_eq!(estimator.sample(24000, 6, gap_at), None);
     for index in 1..80 {
         let now = gap_at + index * SAMPLE_MS;

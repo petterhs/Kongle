@@ -600,6 +600,10 @@ async fn heart_task(bus: &'static device::i2c::Bus) {
                                 at_ms: now.as_millis(),
                             });
                             defmt::info!("[hr] pulse candidate: {} BPM", bpm);
+                            // Publish a newly qualified reading immediately;
+                            // the independent housekeeping phase can lag it.
+                            sender.send(state);
+                            publish_at = Instant::now() + Duration::from_secs(1);
                         }
                     }
                     if now >= publish_at {

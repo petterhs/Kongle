@@ -65,8 +65,10 @@ Four consistent candidates spanning at least three seconds are required before
 publishing: the first reading can arrive after approximately eleven seconds.
 The allowed candidate change remains 10% (minimum 6 BPM). Bounded scheduling
 jitter is linearly resampled onto a 100 ms grid with Q8 precision. A gap greater
-than 180 ms or non-monotonic time resets history; actual missing 200 ms samples
-are never silently filled. Read timestamps are taken after the I2C transaction,
+than 250 ms or non-monotonic time resets history. Points interpolated across
+intervals greater than 180 ms are marked uncertain; at most four of the 80
+window points may be uncertain. Denser stalls are rejected without throwing
+away the entire retained window. Read timestamps are taken after the I2C transaction,
 including shared-bus wait. Timestamp wrapping is supported. Rates remain restricted to 30–220 BPM;
 15-bit clipping bounds track the changed resolution. Analysis taking at least
 10 ms is logged over RTT to make CPU/scheduling cost visible in hardware tests.
@@ -240,8 +242,8 @@ accuracy improvement. Do not tune thresholds further without examining data.
 
 ### Replay a captured optical trace on the host
 
-Export a chronological text log from nRF Connect containing notifications from
-the custom diagnostic characteristic. The converter accepts diagnostic version
+Export a chronological text log from nRF Connect or a JSON capture from Furu.
+The converter accepts diagnostic version
 3 only; older versions encode sample age rather than elapsed sampling time.
 
 ```bash
@@ -259,7 +261,7 @@ and reports qualified BPM separately from the captured device result. It resets
 on session/gain changes and uses the same bounded-jitter resampling as the
 firmware. Captures must be from the current 10 Hz profile: old 40 ms traces
 belong to a different sensor configuration and are not a valid comparison.
-Capture gaps greater than 180 ms can prevent readings even when the watch
+Capture gaps or dense interpolation can prevent readings even when the watch
 processed a contiguous stream. Replay results alone do not prove accuracy.
 Each output row now includes the rejection reason, filled sample count, timing
 resets, analysis count, spectral concentration and waveform similarity; a blank
@@ -298,13 +300,13 @@ No companion-app changes are required.
 | Bytes | Quality payload (20 bytes, little-endian integers) |
 | --- | --- |
 | 0 | Version 1 |
-| 1 | Reason: 0 collecting, 1 timing gap, 2 non-monotonic time, 3 dark, 4 clipped, 5 low amplitude, 6 poor spectral concentration, 7 competing peaks, 8 out-of-range rate, 9 poor periodicity, 10 confirming, 11 qualified |
+| 1 | Reason: 0 collecting, 1 timing gap, 2 non-monotonic time, 3 dark, 4 clipped, 5 low amplitude, 6 poor spectral concentration, 7 competing peaks, 8 out-of-range rate, 9 poor periodicity, 10 confirming, 11 qualified, 12 insufficient real-sample coverage, 13 ambient clipping |
 | 2 / 3 | Filled grid samples (0–80) / last candidate BPM (saturated at 255) |
 | 4–5 / 6–7 | Timing-history resets / invalid optical samples, saturating counters |
 | 8–9 / 10–11 | Analysed windows / qualified readings, saturating counters |
 | 12–13 | Last window's raw ADC peak-to-peak range, not pulse amplitude |
-| 14–15 | Spectral peak/mean concentration multiplied by 100 (minimum 300) |
-| 16–17 | Delayed waveform similarity on 0–10000 scale (minimum 6500) |
+| 14–15 | Spectral peak/mean concentration multiplied by 100 (minimum 300; minimum 1000 for marginal periodicity) |
+| 16–17 | Delayed waveform similarity on 0–10000 scale (minimum 5500, with stronger spectral evidence below 6500) |
 | 18 / 19 | Consistent-candidate count / last input interval in ms (saturated at 255) |
 
 Counters reset only when starting a new measurement. Invalid input and timing
@@ -315,3 +317,62 @@ If physical tests still fail, report the Pulse page text and these 20 bytes afte
 about 15 seconds, alongside raw-v3 data or a full notification trace. The prior
 Furu HR subscription now demonstrably delivers zero/valid payloads, so this
 iteration remains entirely within Kongle while Furu UI work proceeds separately.
+
+## Follow-up to the captured-session review (2026-11-12)
+
+Furu's `test/ui-plus-hr` / `docs/firmware-review-heart-rate.md` provided a real
+capture. The anonymized optical samples are retained in
+`tests/fixtures/hr-weak-optical.csv`; see that folder's README for provenance and
+limitations. Baseline replay reproduces 21 qualified analyses, first at 19003 ms.
+The updated estimator yields 30, first at 12002 ms. These are replay results;
+a new watch capture and independent reference are still required.
+
+Periodicity now accepts similarity >=5500. Marginal scores below the old 6500
+require spectral concentration >=1000 (10x peak/mean), rather than the normal
+300. A single marginal failed analysis with strong spectral evidence may pause
+confirmation without publishing a value. Evidence expires after 2500 ms; large
+rate changes and hard rejections still restart it. This avoids repeatedly
+throwing away progress while preserving noise checks. One positive recording
+cannot prove a threshold safe: white/quantized/temporally correlated noise,
+competing frequencies, out-of-range signals and bursts remain regression tests.
+
+The reviewer suggested bridging 600 ms and increasing gain/LED current. Neither
+is adopted. Short 181–250 ms stalls may be bridged, but uncertain points are
+limited to 5% of a window and longer gaps still reset. Frequent stalls report
+InsufficientCoverage instead of endless WarmingUp. The actual recorded session
+had no such gaps, so this is hardening rather than the explanation for that
+capture. Motion polling is unchanged; normal small shared-bus transactions do
+not by themselves establish an 180+ ms stall.
+
+Ambient saturation still invalidates a sample, now with reason 13 and
+"Too much light" on the watch. PPG saturation retains reason 4. These reasons
+are preserved through refilling rather than being immediately overwritten by
+WarmingUp on the next non-clipped sample. Gain is already x1 and LED drive is
+already the lowest selected setting; changing integration/resolution or LED
+power automatically requires separate validation. No fabricated or clipped
+reading is published to conceal these conditions.
+
+Qualified readings are sent to the shared BLE state immediately instead of
+waiting for the separate one-second housekeeping phase. Raw-v3 and quality-v1
+payload sizes/field positions are unchanged; quality reasons 12/13 are additive.
+Furu can continue recording raw bytes without an update. No Furu source files
+are changed by these firmware corrections.
+
+Furu JSON exports can be replayed directly without an ad-hoc Node decoder:
+
+```bash
+python scripts/hr-diagnostics-to-csv.py /path/to/furu-capture.json --output /tmp/hr.csv
+```
+
+The same host replay command above then applies. Conversion ignores measurement
+and quality packets and exports only measuring raw-v3 frames. Unsupported capture
+versions and invalid byte arrays are not guessed. Identity/wall-clock metadata
+is omitted from the numeric CSV.
+
+Review source at the time of this investigation:
+[Furu firmware review](https://github.com/petterhs/Furu/blob/57a1c0fdf3572b3645f718aeb0396540d5c35792/docs/firmware-review-heart-rate.md).
+The review's suggestion to expose warmup/confirmation progress was already
+implemented by `4e2340d`. Spectral concentration near 1800 means approximately
+18x peak/mean, well above the normal 3x cutoff, so it was not itself a failing
+threshold in this trace. It now supplies the additional evidence needed for
+marginal periodicity. This does not establish the person's true heart rate.

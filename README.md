@@ -178,6 +178,17 @@ confirmation is still to be implemented after rollback testing.
 
 ## Contributing
 
+For host tests alone, enter `devenv shell` and select the host target explicitly:
+
+```bash
+cargo test --locked --manifest-path tests/host/Cargo.toml \
+  --target "$(rustc -vV | sed -n 's/^host: //p')"
+```
+
+Plain `cargo test` inherits the embedded ARM target from `.cargo/config.toml`,
+which cannot run the host tests or provide `std`. Pulse trace replay and capture
+regressions are described in [docs/heart-rate.md](docs/heart-rate.md).
+
 Run `devenv shell -- bash scripts/check.sh` for the same checks as CI: formatting,
 host regression tests for CTS parsing and display bounds, Clippy, both release layouts, image hash verification, shell syntax, and bootloader
 checksum. PRs and pushes to `master` upload the MCUBoot BIN and its matching ELF

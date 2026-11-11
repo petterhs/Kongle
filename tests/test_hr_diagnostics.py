@@ -1,5 +1,6 @@
 """Exercise exported-log decoding, session boundaries and real missing samples."""
 import importlib.util
+import json
 import struct
 import unittest
 from pathlib import Path
@@ -16,6 +17,23 @@ def frame(count, elapsed, *, gain=1, version=3, phase=1, separator="-"):
 
 
 class HrDiagnosticsTests(unittest.TestCase):
+    def test_furu_json_uses_only_diagnostic_frames_and_exports_no_identity(self):
+        raw = list(bytes.fromhex(frame(1, 100).split("(0x) ")[1].replace("-", " ")))
+        capture = {"version": 1, "address": "private", "startedAt": "private", "samples": [
+            {"source": "quality", "bytes": raw},
+            {"source": "diagnostics", "bytes": raw},
+            {"source": "diagnostics", "bytes": raw},
+            {"source": "diagnostics", "bytes": [999] * 20},
+            {"source": "diagnostics", "bytes": "invalid"},
+        ]}
+        rows = MODULE.extract(json.dumps(capture))
+        self.assertEqual(rows, MODULE.extract(frame(1, 100)))
+        self.assertNotIn("private", repr(rows))
+
+    def test_unknown_furu_capture_version_is_not_guessed(self):
+        with self.assertRaises(ValueError):
+            MODULE.extract(json.dumps({"version": 2, "samples": []}))
+
     def test_chronological_frames_preserve_timestamps_and_gaps_without_duplicate_samples(self):
         text = "\n".join([frame(1, 100), frame(1, 100), frame(3, 300, separator=" "), frame(4, 400)])
         rows = MODULE.extract(text)

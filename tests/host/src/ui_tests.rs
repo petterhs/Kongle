@@ -161,6 +161,8 @@ fn pulse_quality_messages_fit_without_redrawing_the_panel_in_both_languages() {
             Reason::NonMonotonic,
             Reason::Dark,
             Reason::Clipped,
+            Reason::AmbientClipped,
+            Reason::InsufficientCoverage,
             Reason::LowAmplitude,
             Reason::PoorSpectrum,
             Reason::Ambiguous,
