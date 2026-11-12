@@ -40,6 +40,43 @@ fn captured_weak_optical_trace_recovers_earlier_without_rate_doubling() {
 }
 
 #[test]
+fn captured_gain_x2_trace_retains_early_continuous_readings_without_clipping() {
+    let mut estimator = Estimator::new();
+    let mut first = None;
+    let mut qualified = 0;
+    let mut previous = None;
+    let mut state = State {
+        phase: Phase::Measuring,
+        ..State::EMPTY
+    };
+    let mut coverage_ms = 0;
+    for row in include_str!("../../fixtures/hr-gain-x2-optical.csv")
+        .lines()
+        .skip(1)
+    {
+        let values: Vec<u64> = row.split(',').map(|value| value.parse().unwrap()).collect();
+        let at = values[0];
+        if let Some(previous) = previous {
+            if state.bpm(previous).is_some() {
+                coverage_ms += at - previous;
+            }
+        }
+        if let Some(bpm) = estimator.sample(values[1] as u32, values[2] as u32, at) {
+            assert!((60..=80).contains(&bpm)); // Continuity, not independent accuracy.
+            first.get_or_insert(at);
+            qualified += 1;
+            state.last = Some(Reading { bpm, at_ms: at });
+        }
+        previous = Some(at);
+    }
+    assert!(first.unwrap() <= 12500, "{first:?}");
+    assert!(qualified >= 28, "{qualified}");
+    assert!(coverage_ms >= 30000, "{coverage_ms}");
+    assert_eq!(estimator.quality().timing_resets, 0);
+    assert_eq!(estimator.quality().invalid_samples, 0);
+}
+
+#[test]
 fn confirmation_survives_one_marginal_miss_but_expires_and_rechecks_rate() {
     use crate::heart_rate::RateConfirmation;
     let mut confirmation = RateConfirmation::new();
