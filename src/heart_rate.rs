@@ -195,10 +195,6 @@ impl State {
         Some(reading.bpm)
     }
 
-    pub fn age_seconds(self, now_ms: u64) -> Option<u64> {
-        now_ms.checked_sub(self.last?.at_ms).map(|age| age / 1000)
-    }
-
     /// SIG 0x2A37: live uint8 BPM, contact detection unsupported. Do not replay
     /// a cached watch reading as a new phone measurement. Zero is invalid,
     /// not a real pulse; Furu's parser hides it. Subscription never starts HR.

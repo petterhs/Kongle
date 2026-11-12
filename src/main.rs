@@ -937,7 +937,21 @@ async fn main(spawner: Spawner) {
         match embassy_futures::select::select(
             ota_rx.changed(),
             embassy_futures::select::select(
-                time_rx.changed(),
+                async {
+                    if awake && watch_ui.heart_loading() {
+                        match embassy_futures::select::select(
+                            time_rx.changed(),
+                            Timer::after(Duration::from_millis(200)),
+                        )
+                        .await
+                        {
+                            embassy_futures::select::Either::First(time) => Some(time),
+                            embassy_futures::select::Either::Second(_) => None,
+                        }
+                    } else {
+                        Some(time_rx.changed().await)
+                    }
+                },
                 embassy_futures::select::select(
                     battery_rx.changed(),
                     embassy_futures::select::select(
@@ -991,7 +1005,9 @@ async fn main(spawner: Spawner) {
                 if !awake {
                     continue;
                 }
-                watch_ui.draw_time(&mut display, time);
+                if let Some(time) = time {
+                    watch_ui.draw_time(&mut display, time);
+                }
             }
             embassy_futures::select::Either::Second(embassy_futures::select::Either::Second(
                 embassy_futures::select::Either::First(battery_state),
@@ -1173,13 +1189,7 @@ async fn main(spawner: Spawner) {
         }
         heart_was_measuring = heart_measuring;
         let heart_changed = watch_ui.set_heart(heart_state, Instant::now().as_millis());
-        let quality_changed = watch_ui.set_heart_quality(
-            HEART_DIAGNOSTICS
-                .try_get()
-                .unwrap_or(heart_rate::Diagnostics::EMPTY)
-                .quality,
-        );
-        if (heart_changed || quality_changed) && awake && !redraw {
+        if heart_changed && awake && !redraw {
             watch_ui.draw_heart(&mut display);
         }
         if let Some(start) = watch_ui.take_heart_request() {

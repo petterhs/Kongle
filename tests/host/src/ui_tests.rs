@@ -81,8 +81,8 @@ fn pulse_updates_preserve_panel_and_button_borders_and_fit_both_languages() {
     for (index, (old, new)) in before.iter().zip(&frame.pixels).enumerate() {
         let x = index % 240;
         let y = index / 240;
-        let field =
-            (18..222).contains(&x) && ([40..68, 76..104, 108..136].iter().any(|r| r.contains(&y)));
+        let field = (20..220).contains(&x)
+            && ([40..120, 122..146, 205..229].iter().any(|r| r.contains(&y)));
         let button_label = (28..208).contains(&x) && (158..186).contains(&y);
         if !field && !button_label {
             assert_eq!(old, new, "pulse overwrote {},{}", x, y);
@@ -134,63 +134,69 @@ fn pulse_updates_preserve_panel_and_button_borders_and_fit_both_languages() {
 }
 
 #[test]
-fn pulse_quality_messages_fit_without_redrawing_the_panel_in_both_languages() {
-    use crate::heart_rate::{Phase, Quality, Reason, State};
-    for norwegian in [false, true] {
-        let mut ui = WatchUi::new();
-        if norwegian {
-            ui.handle_touch(TouchEvent::SwipeUp);
-            ui.handle_touch(TouchEvent::Tap { x: 50, y: 160 });
-            ui.handle_touch(TouchEvent::Tap { x: 50, y: 120 });
-            ui.show_clock();
+fn pulse_loader_keeps_waiting_and_does_not_repaint_digits_or_borders() {
+    use crate::heart_rate::{Phase, Reading, State};
+    let mut ui = WatchUi::new();
+    ui.handle_touch(TouchEvent::Tap { x: 170, y: 180 });
+    let measuring = State {
+        phase: Phase::Measuring,
+        started_ms: 100,
+        ..State::EMPTY
+    };
+    ui.set_heart(measuring, 100);
+    assert!(ui.heart_loading());
+    let mut frame = Frame::new();
+    render(&mut ui, &mut frame);
+    frame.preview("pulse-start");
+    let initial = frame.pixels.clone();
+    // Continue past the estimated startup time. Elapsed time must never
+    // fabricate a reading or finish the loader; only a fresh result does.
+    for now in [300, 5700, 11100, 11300, 14500, 40300] {
+        assert!(ui.set_heart(measuring, now));
+        assert!(ui.heart_loading());
+        frame.written.clear();
+        ui.draw_heart(&mut frame);
+        for p in &frame.written {
+            assert!(
+                !(40..120).contains(&p.y),
+                "loader repainted large digits at {p:?}"
+            );
+            assert!(
+                !(148..198).contains(&p.y),
+                "loader repainted button at {p:?}"
+            );
+            assert!((20..220).contains(&p.x) && (140..145).contains(&p.y));
         }
-        ui.handle_touch(TouchEvent::Tap { x: 170, y: 180 });
-        ui.set_heart(
-            State {
-                phase: Phase::Measuring,
-                ..State::EMPTY
-            },
-            1000,
+        assert_eq!(
+            initial[40 * 240..120 * 240],
+            frame.pixels[40 * 240..120 * 240]
         );
-        let mut frame = Frame::new();
-        render(&mut ui, &mut frame);
-        let before = frame.pixels.clone();
-        for reason in [
-            Reason::WarmingUp,
-            Reason::TimingGap,
-            Reason::NonMonotonic,
-            Reason::Dark,
-            Reason::Clipped,
-            Reason::AmbientClipped,
-            Reason::InsufficientCoverage,
-            Reason::LowAmplitude,
-            Reason::PoorSpectrum,
-            Reason::Ambiguous,
-            Reason::OutOfRange,
-            Reason::NotPeriodic,
-            Reason::Confirming,
-            Reason::Valid,
-        ] {
-            ui.set_heart_quality(Quality {
-                reason,
-                filled: 80,
-                confirmation: 3,
-                ..Quality::EMPTY
-            });
-            ui.draw_heart(&mut frame);
-            assert_eq!(frame.clipped, 0, "{reason:?}, norwegian={norwegian}");
-            for (index, (old, new)) in before.iter().zip(&frame.pixels).enumerate() {
-                let x = index % 240;
-                let y = index / 240;
-                let field = (18..222).contains(&x)
-                    && [40..68, 76..104, 108..136].iter().any(|r| r.contains(&y));
-                let button = (28..208).contains(&x) && (158..186).contains(&y);
-                if !field && !button {
-                    assert_eq!(old, new, "{reason:?} overwrote {x},{y}");
-                }
-            }
-        }
     }
+    frame.preview("pulse-waiting");
+    let with_reading = State {
+        last: Some(Reading {
+            bpm: 72,
+            at_ms: 40400,
+        }),
+        ..measuring
+    };
+    ui.set_heart(with_reading, 40400);
+    assert!(!ui.heart_loading());
+    ui.draw_heart(&mut frame);
+    frame.preview("pulse-reading");
+    assert_ne!(
+        initial[40 * 240..120 * 240],
+        frame.pixels[40 * 240..120 * 240]
+    );
+    // Expiry returns to dashes and the loader rather than showing stale BPM.
+    ui.set_heart(with_reading, 43000);
+    assert!(ui.heart_loading());
+    ui.draw_heart(&mut frame);
+    assert_eq!(
+        initial[40 * 240..120 * 240],
+        frame.pixels[40 * 240..120 * 240]
+    );
+    assert_eq!(frame.clipped, 0);
 }
 
 #[test]
@@ -290,12 +296,14 @@ fn latin1_notifications_survive_parsing_and_wrapping_without_split_bytes() {
 struct Frame {
     pixels: std::vec::Vec<Rgb565>,
     clipped: usize,
+    written: std::vec::Vec<Point>,
 }
 impl Frame {
     fn new() -> Self {
         Self {
             pixels: vec![crate::theme::BACKGROUND; 240 * 240],
             clipped: 0,
+            written: vec![],
         }
     }
     fn preview(&self, name: &str) {
@@ -331,6 +339,7 @@ impl DrawTarget for Frame {
         pixels: I,
     ) -> Result<(), Self::Error> {
         for Pixel(p, c) in pixels {
+            self.written.push(p);
             if (0..240).contains(&p.x) && (0..240).contains(&p.y) {
                 self.pixels[p.y as usize * 240 + p.x as usize] = c;
             } else {

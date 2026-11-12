@@ -201,9 +201,11 @@ pub struct WatchUi {
     media_request: Option<crate::media::Request>,
     steps: crate::steps::State,
     heart: crate::heart_rate::State,
-    heart_quality: crate::heart_rate::Quality,
     heart_now_ms: u64,
     heart_request: Option<bool>,
+    drawn_heart_value: Option<Option<u8>>,
+    drawn_heart_phase: Option<crate::heart_rate::Phase>,
+    drawn_heart_loading: Option<bool>,
 }
 
 impl WatchUi {
@@ -227,9 +229,11 @@ impl WatchUi {
             media_request: None,
             steps: crate::steps::State::EMPTY,
             heart: crate::heart_rate::State::EMPTY,
-            heart_quality: crate::heart_rate::Quality::EMPTY,
             heart_now_ms: 0,
             heart_request: None,
+            drawn_heart_value: None,
+            drawn_heart_phase: None,
+            drawn_heart_loading: None,
         }
     }
 
@@ -288,22 +292,22 @@ impl WatchUi {
         let changed = self.heart != state
             || self.heart.bpm(self.heart_now_ms) != state.bpm(now_ms)
             || (self.heart_visible()
-                && self.heart.age_seconds(self.heart_now_ms) != state.age_seconds(now_ms));
+                && self.heart.phase == crate::heart_rate::Phase::Measuring
+                && self.heart_now_ms / 200 != now_ms / 200);
         self.heart = state;
         self.heart_now_ms = now_ms;
         changed
     }
 
-    pub fn take_heart_request(&mut self) -> Option<bool> {
-        self.heart_request.take()
+    /// Only animate while visible and awaiting a usable live result.
+    pub fn heart_loading(&self) -> bool {
+        self.heart_visible()
+            && self.heart.phase == crate::heart_rate::Phase::Measuring
+            && self.heart.bpm(self.heart_now_ms).is_none()
     }
 
-    pub fn set_heart_quality(&mut self, quality: crate::heart_rate::Quality) -> bool {
-        let changed = self.heart_quality.reason != quality.reason
-            || self.heart_quality.filled != quality.filled
-            || self.heart_quality.confirmation != quality.confirmation;
-        self.heart_quality = quality;
-        changed && self.heart_visible()
+    pub fn take_heart_request(&mut self) -> Option<bool> {
+        self.heart_request.take()
     }
 
     fn stop_heart_on_exit(&mut self) {
@@ -312,7 +316,7 @@ impl WatchUi {
         }
     }
 
-    pub fn draw_heart<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+    pub fn draw_heart<D: DrawTarget<Color = Rgb565>>(&mut self, display: &mut D) {
         let style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
             .text_color(theme::HEART)
@@ -338,80 +342,86 @@ impl WatchUi {
                     .draw(display);
             }
             Page::HeartRate => {
-                if !self.skip_clear {
-                    for y in [40, 76, 108] {
-                        let _ = Rectangle::new(Point::new(18, y), Size::new(204, 28))
+                use crate::heart_rate::Phase;
+                let bpm = self.heart.bpm(self.heart_now_ms);
+                // Keep the large digits untouched during loader animation.
+                if self.skip_clear || self.drawn_heart_value != Some(bpm) {
+                    if !self.skip_clear {
+                        let _ = Rectangle::new(Point::new(24, 40), Size::new(192, 80))
                             .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
                             .draw(display);
                     }
-                    let _ = Rectangle::new(Point::new(28, 158), Size::new(180, 28))
-                        .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
+                    value.clear();
+                    if let Some(bpm) = bpm {
+                        let _ = write!(&mut value, "{bpm}");
+                    } else {
+                        let _ = value.push_str("---");
+                    }
+                    let digits = SevenSegmentStyleBuilder::new()
+                        .digit_size(Size::new(52, 78))
+                        .digit_spacing(10)
+                        .segment_width(8)
+                        .segment_color(theme::HEART)
+                        .build();
+                    let width = value.len() as i32 * 62 - 10;
+                    let _ = Text::with_baseline(
+                        &value,
+                        Point::new(120 - width / 2, 40),
+                        digits,
+                        Baseline::Top,
+                    )
+                    .draw(display);
+                    self.drawn_heart_value = Some(bpm);
+                }
+                let loading = self.heart_loading();
+                let details_changed = self.skip_clear
+                    || self.drawn_heart_loading != Some(loading)
+                    || self.drawn_heart_phase != Some(self.heart.phase);
+                if details_changed {
+                    if !self.skip_clear {
+                        let _ = Rectangle::new(Point::new(20, 122), Size::new(200, 24))
+                            .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
+                            .draw(display);
+                        let _ = Rectangle::new(Point::new(20, 205), Size::new(200, 24))
+                            .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
+                            .draw(display);
+                    }
+                    if !loading {
+                        let _ =
+                            Text::with_baseline("BPM", Point::new(105, 122), style, Baseline::Top)
+                                .draw(display);
+                    }
+                    let status = match self.heart.phase {
+                        Phase::Measuring if bpm.is_none() => self.tr("Hold still", "Hold deg i ro"),
+                        Phase::NoSignal => self.tr("Try again", "Prøv igjen"),
+                        Phase::Missing => self.tr("Sensor unavailable", "Sensor utilgjengelig"),
+                        Phase::Fault => self.tr("Sensor error", "Sensorfeil"),
+                        _ => "",
+                    };
+                    let x = 120 - status.chars().count() as i32 * 5;
+                    let _ = Text::with_baseline(status, Point::new(x, 207), style, Baseline::Top)
                         .draw(display);
+                    self.drawn_heart_loading = Some(loading);
                 }
-                let _ = value.push_str(" BPM");
-                let _ = Text::new(&value, Point::new(20, 62), style).draw(display);
-                use crate::heart_rate::Phase;
-                let status = match self.heart.phase {
-                    Phase::Idle if self.heart.last.is_some() => {
-                        self.tr("Last reading", "Siste måling")
+                if loading {
+                    // Estimated first result, not a sensor-ready deadline. After
+                    // this interval keep moving until an actual result arrives.
+                    let elapsed = self.heart_now_ms.saturating_sub(self.heart.started_ms);
+                    let track = Rectangle::new(Point::new(20, 140), Size::new(200, 5));
+                    let _ = track
+                        .into_styled(PrimitiveStyle::with_fill(theme::DISABLED))
+                        .draw(display);
+                    let (x, width) = if elapsed < 11_200 {
+                        (20, (elapsed * 200 / 11_200) as u32)
+                    } else {
+                        (20 + (((elapsed - 11_200) / 200) % 17) as i32 * 10, 40)
+                    };
+                    if width > 0 {
+                        let _ = Rectangle::new(Point::new(x, 140), Size::new(width, 5))
+                            .into_styled(PrimitiveStyle::with_fill(theme::HEART))
+                            .draw(display);
                     }
-                    Phase::Idle => self.tr("Not measuring", "Måler ikke"),
-                    Phase::Measuring => self.tr("Hold still", "Hold deg i ro"),
-                    Phase::NoSignal => self.tr("No clear signal", "Ingen klar puls"),
-                    Phase::Missing => self.tr("Sensor unavailable", "Sensor utilgjengelig"),
-                    Phase::Fault => self.tr("Sensor error", "Sensorfeil"),
-                };
-                let _ = Text::new(status, Point::new(20, 98), style).draw(display);
-                let mut age: String<24> = String::new();
-                if self.heart.phase == Phase::Measuring
-                    && self.heart.bpm(self.heart_now_ms).is_none()
-                {
-                    use crate::heart_rate::Reason;
-                    let quality = self.heart_quality;
-                    match quality.reason {
-                        Reason::WarmingUp | Reason::TimingGap | Reason::NonMonotonic => {
-                            let _ = write!(
-                                &mut age,
-                                "{} {}/80",
-                                self.tr("Collecting", "Samler"),
-                                quality.filled
-                            );
-                        }
-                        Reason::Confirming => {
-                            let _ = write!(
-                                &mut age,
-                                "{} {}/4",
-                                self.tr("Checking", "Sjekker"),
-                                quality.confirmation.min(4)
-                            );
-                        }
-                        Reason::Dark => {
-                            let _ = age.push_str(self.tr("Check skin contact", "Sjekk hudkontakt"));
-                        }
-                        Reason::Clipped => {
-                            let _ = age.push_str(self.tr("Signal saturated", "Signal mettet"));
-                        }
-                        Reason::AmbientClipped => {
-                            let _ = age.push_str(self.tr("Too much light", "For mye lys"));
-                        }
-                        Reason::InsufficientCoverage => {
-                            let _ = age.push_str(self.tr("Sampling unstable", "Ustabil sampling"));
-                        }
-                        Reason::LowAmplitude => {
-                            let _ = age.push_str(self.tr("Signal too weak", "For svakt signal"));
-                        }
-                        _ => {
-                            let _ = age.push_str(self.tr("No clear rhythm", "Ingen tydelig puls"));
-                        }
-                    }
-                } else if let (Some(reading), Some(seconds)) =
-                    (self.heart.last, self.heart.age_seconds(self.heart_now_ms))
-                {
-                    let _ = write!(&mut age, "{} BPM / {}s", reading.bpm, seconds.min(99999));
-                } else {
-                    let _ = age.push_str(self.tr("No reading yet", "Ingen måling ennå"));
                 }
-                let _ = Text::new(&age, Point::new(20, 130), style).draw(display);
                 if self.skip_clear {
                     let _ = RoundedRectangle::with_equal_corners(
                         layout::HEART_MEASURE,
@@ -419,25 +429,28 @@ impl WatchUi {
                     )
                     .into_styled(PrimitiveStyle::with_stroke(theme::BORDER, 2))
                     .draw(display);
-                    let _ = Text::new(
-                        self.tr("Up to 45 seconds", "Opptil 45 sekunder"),
-                        Point::new(20, 220),
-                        style,
-                    )
-                    .draw(display);
                 }
-                let label = if self.heart.phase == Phase::Measuring {
-                    self.tr("Stop", "Stopp")
-                } else {
-                    self.tr("Measure", "Mål puls")
-                };
-                let _ = Text::new(label, Point::new(30, 180), style).draw(display);
+                if self.skip_clear || self.drawn_heart_phase != Some(self.heart.phase) {
+                    if !self.skip_clear {
+                        let _ = Rectangle::new(Point::new(28, 158), Size::new(180, 28))
+                            .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
+                            .draw(display);
+                    }
+                    let label = if self.heart.phase == Phase::Measuring {
+                        self.tr("Stop", "Stopp")
+                    } else {
+                        self.tr("Measure", "Mål puls")
+                    };
+                    let x = 120 - label.chars().count() as i32 * 5;
+                    let _ = Text::new(label, Point::new(x, 180), style).draw(display);
+                    self.drawn_heart_phase = Some(self.heart.phase);
+                }
             }
             _ => {}
         }
     }
 
-    pub fn draw_steps<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+    pub fn draw_steps<D: DrawTarget<Color = Rgb565>>(&mut self, display: &mut D) {
         match self.navigation.page() {
             Page::Clock => {
                 if !self.skip_clear {
@@ -721,12 +734,12 @@ impl WatchUi {
         self.navigation.clock()
     }
 
-    pub fn draw_static<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+    pub fn draw_static<D: DrawTarget<Color = Rgb565>>(&mut self, display: &mut D) {
         panel(display, "", 44, 108);
         self.draw_statuses(display);
     }
 
-    fn draw_statuses<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+    fn draw_statuses<D: DrawTarget<Color = Rgb565>>(&mut self, display: &mut D) {
         // Remote fields are omitted until an integration enables them.
         let style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
@@ -891,7 +904,7 @@ impl WatchUi {
     }
 
     pub fn draw_update<D: DrawTarget<Color = Rgb565>>(
-        &self,
+        &mut self,
         display: &mut D,
         status: UpdateStatus,
     ) {
@@ -1020,7 +1033,7 @@ impl WatchUi {
         draw_icon::<D, SkipNext>(display, Point::new(180, 160), color);
     }
 
-    fn draw_page<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+    fn draw_page<D: DrawTarget<Color = Rgb565>>(&mut self, display: &mut D) {
         let title = match self.navigation.page() {
             Page::Clock => return,
             Page::System => self.tr("system", "system"),
