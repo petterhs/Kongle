@@ -542,8 +542,12 @@ async fn heart_task(bus: &'static device::i2c::Bus) {
         }
         state.phase = Phase::Measuring;
         state.started_ms = Instant::now().as_millis();
+        diagnostic.gain = hrs3300::MEASUREMENT_GAIN;
         sender.send(state);
-        defmt::info!("[hr] measuring; 15-bit, 10 Hz, gain x1, 12.5 mA drive; 45 second limit");
+        defmt::info!(
+            "[hr] measuring; 15-bit, 10 Hz, gain x{}, 12.5 mA drive; 45 second limit",
+            hrs3300::MEASUREMENT_GAIN
+        );
         let mut estimator = Estimator::new();
         HEART_DIAGNOSTICS.sender().send(diagnostic);
         let mut window_min = u32::MAX;

@@ -1,5 +1,14 @@
 # On-demand HRS3300 pulse prototype
 
+**Current test variant: `test/heart-rate-gain-x2`.** This changes only acquisition
+gain to fixed x2. LED current remains 12.5 mA, resolution 15-bit, conversion wait
+50 ms, sampling 10 Hz and DSP thresholds identical to the x1 baseline `0601db8`.
+The diagnostic gain nibble reports 2 after a successfully verified start.
+Compare a full stationary capture with the baseline using the same fit/posture;
+inspect raw swing, clipping, time to first rate and coverage. Higher gain may
+amplify noise too and is not assumed to improve accuracy. Keep the baseline
+available. Historical reference-acquisition descriptions below refer to x1.
+
 Branch `feature/heart-rate` extends the tested sensor/steps foundation for 0.4.0.
 The development watch's HRS3300 has physically detached. Host/ARM checks cannot
 establish sensor operation, signal quality, LED shutdown or accuracy: those

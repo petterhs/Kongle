@@ -727,7 +727,13 @@ mod transport {
         assert_eq!(registers.borrow().values[0x0c] & 0x60, 0x20);
         assert_eq!(registers.borrow().values[1], 0xd0);
         assert_eq!(registers.borrow().values[0x16], 0x77);
-        assert_eq!(registers.borrow().values[0x17], 0);
+        assert_eq!(registers.borrow().values[0x17], 4); // x2; LED still 12.5 mA.
+        let diag = crate::heart_rate::Diagnostics {
+            gain: crate::hrs3300::MEASUREMENT_GAIN,
+            ..crate::heart_rate::Diagnostics::EMPTY
+        }
+        .encode(crate::heart_rate::State::EMPTY, 0);
+        assert_eq!(u16::from_le_bytes([diag[4], diag[5]]) >> 12, 2);
         assert!(run(sensor.sample()).is_ok());
         run(sensor.stop()).unwrap();
         assert_eq!(registers.borrow().values[0x0c], 0);
