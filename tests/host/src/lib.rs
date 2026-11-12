@@ -8,6 +8,10 @@ mod button_gestures;
 mod language;
 #[path = "../../../src/media.rs"]
 mod media;
+#[path = "../../../src/motion.rs"]
+mod motion;
+#[path = "../../../src/steps.rs"]
+mod steps;
 #[path = "../../../src/ui/theme.rs"]
 mod theme;
 #[path = "../../../src/ui.rs"]
@@ -59,6 +63,8 @@ mod ota;
 #[path = "../../../src/touch.rs"]
 mod touch;
 
+#[cfg(test)]
+mod motion_tests;
 #[cfg(test)]
 mod ui_tests;
 

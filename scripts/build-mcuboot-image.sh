@@ -45,6 +45,7 @@ if [[ ! -f "${ELF}" ]]; then
 fi
 
 mkdir -p "${OUT_DIR}"
+cp "${REPO_ROOT}/src/device/bosch/LICENSE" "${OUT_DIR}/THIRD-PARTY-NOTICES.txt"
 
 # Pick an objcopy implementation provided by the toolchain.
 if command -v arm-none-eabi-objcopy >/dev/null 2>&1; then

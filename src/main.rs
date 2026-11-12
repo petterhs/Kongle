@@ -19,8 +19,10 @@ mod firmware_state;
 mod flash;
 mod haptics;
 mod media;
+mod motion;
 mod notifications;
 mod ota;
+mod steps;
 #[path = "ui/theme.rs"]
 mod theme;
 mod touch;
@@ -40,7 +42,6 @@ use embassy_nrf::{
     gpiote::{OutputChannel as GpioteOutput, OutputChannelPolarity},
     ppi::Ppi,
     timer::{Frequency as TimerFrequency, Timer as HardwareTimer},
-    twim::{Config as TwimConfig, Twim},
 };
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
 use embassy_sync::mutex::Mutex as AsyncMutex;
@@ -112,12 +113,15 @@ static NOTIFICATION_CH: Channel<CriticalSectionRawMutex, notifications::Notifica
     Channel::new();
 static MEDIA_WATCH: Watch<CriticalSectionRawMutex, media::State, 2> = Watch::new();
 static MEDIA_COMMANDS: Channel<CriticalSectionRawMutex, media::Request, 4> = Channel::new();
-static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 1> = Watch::new();
+static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
+static MOTION_WATCH: Watch<CriticalSectionRawMutex, steps::State, 1> = Watch::new();
+static STEP_DATE: Watch<CriticalSectionRawMutex, Option<chrono::NaiveDate>, 1> = Watch::new();
 static VIBRATIONS: Channel<CriticalSectionRawMutex, haptics::Pattern, 4> = Channel::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
 static FLASH_CELL: StaticCell<AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>> =
     StaticCell::new();
-static TOUCH_TX_BUFFER: StaticCell<[u8; 8]> = StaticCell::new();
+static SENSOR_TX_BUFFER: StaticCell<[u8; 32]> = StaticCell::new();
+static SENSOR_BUS: StaticCell<device::i2c::Bus> = StaticCell::new();
 type FlashSpi = SharedSpiDevice<'static, NoopRawMutex, Spim<'static>, Output<'static>>;
 /// The future BLE receiver publishes progress here; the display owns the view.
 pub(crate) static OTA_WATCH: Watch<CriticalSectionRawMutex, UpdateStatus, 2> = Watch::new();
@@ -144,13 +148,22 @@ async fn clock_task(
         chrono::NaiveTime::from_hms_opt(11, 0, 0).unwrap(),
     );
     sender.send(TimeState::from_naive(dt));
+    let mut synchronized = false;
+    let mut step_date = None;
+    STEP_DATE.sender().send(None);
     let mut ticker = Ticker::every(Duration::from_secs(1));
     loop {
         ticker.next().await;
         if let Ok(new_dt) = set_time_rx.try_receive() {
             dt = new_dt;
+            synchronized = true;
         } else {
             dt = current_time::next_cts_second(dt);
+        }
+        let date = synchronized.then_some(dt.date());
+        if date != step_date {
+            STEP_DATE.sender().send(date);
+            step_date = date;
         }
         sender.send(TimeState::from_naive(dt));
     }
@@ -289,7 +302,7 @@ async fn button_task(
 #[embassy_executor::task]
 async fn touch_task(
     mut touch: device::input::TouchScreen<'static>,
-    mut awake_rx: embassy_sync::watch::Receiver<'static, CriticalSectionRawMutex, bool, 1>,
+    mut awake_rx: embassy_sync::watch::Receiver<'static, CriticalSectionRawMutex, bool, 2>,
     sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, InputEvent, 8>,
 ) {
     let mut active = false;
@@ -363,6 +376,96 @@ async fn wdt_task_1(mut h0: embassy_nrf::wdt::WatchdogHandle) {
     loop {
         ticker.next().await;
         h0.pet();
+    }
+}
+
+#[embassy_executor::task]
+async fn motion_task(
+    bus: device::i2c::Device<'static>,
+    mut awake_rx: embassy_sync::watch::Receiver<'static, CriticalSectionRawMutex, bool, 2>,
+) {
+    let mut sensor = motion::Motion::new(bus, embassy_time::Delay);
+    let sender = MOTION_WATCH.sender();
+    sender.send(steps::State::EMPTY);
+    defmt::info!("[motion] initializing step engine");
+    match embassy_time::with_timeout(Duration::from_secs(8), sensor.initialize()).await {
+        Ok(Ok(config)) => {
+            let name = match config.variant {
+                motion::Variant::Bma421 => "BMA421",
+                motion::Variant::Bma425 => "BMA425",
+            };
+            defmt::info!(
+                "[motion] {} ready; config ID {:04x}, accel {:02x}, range {:02x}",
+                name,
+                config.id,
+                config.accel,
+                config.range
+            );
+        }
+        result => {
+            defmt::warn!(
+                "[motion] initialization failed: {:?}",
+                defmt::Debug2Format(&result)
+            );
+            if !matches!(
+                embassy_time::with_timeout(Duration::from_millis(500), sensor.stop()).await,
+                Ok(Ok(()))
+            ) {
+                defmt::warn!("[motion] shutdown failed after initialization error");
+            }
+            return;
+        }
+    }
+    let mut previous = None;
+    let mut failures = 0;
+    let mut counts = steps::Counts::new(Instant::now().as_millis());
+    let mut date_rx = STEP_DATE.receiver().unwrap();
+    loop {
+        match embassy_time::with_timeout(Duration::from_millis(500), sensor.counter()).await {
+            Ok(Ok(raw)) => {
+                failures = 0;
+                let date = date_rx.try_get().flatten();
+                match counts.observe(raw, Instant::now().as_millis(), date) {
+                    Ok(state) => sender.send(state),
+                    Err(error) => {
+                        sender.send(counts.unavailable());
+                        defmt::warn!(
+                            "[motion] count discontinuity: {:?}",
+                            defmt::Debug2Format(&error)
+                        );
+                    }
+                }
+                if previous != Some(raw) {
+                    defmt::info!("[motion] raw steps: {}", raw);
+                    previous = Some(raw);
+                }
+            }
+            result => {
+                sender.send(counts.unavailable());
+                failures += 1;
+                defmt::warn!(
+                    "[motion] counter read failed: {:?}",
+                    defmt::Debug2Format(&result)
+                );
+                if failures >= 3 {
+                    let _ =
+                        embassy_time::with_timeout(Duration::from_millis(500), sensor.stop()).await;
+                    defmt::warn!("[motion] stopped after repeated read errors; no automatic reset");
+                    return;
+                }
+            }
+        }
+        let awake = awake_rx.try_get().unwrap_or(true);
+        // The hardware counts independently of the CPU and display. Refresh
+        // promptly on wake; background reads are bounded rather than per-step.
+        let interval = if awake { 5 } else { 30 };
+        let _ = awake_rx.try_changed();
+        let _ = date_rx.try_changed();
+        embassy_futures::select::select(
+            Timer::after(Duration::from_secs(interval)),
+            embassy_futures::select::select(awake_rx.changed(), date_rx.changed()),
+        )
+        .await;
     }
 }
 
@@ -486,21 +589,22 @@ async fn main(spawner: Spawner) {
         Input::new(p.P0_13, Pull::Down),
         Output::new(p.P0_15, Level::High, OutputDrive::Standard),
     );
-    let mut touch_config = TwimConfig::default();
-    touch_config.sda_pullup = true;
-    touch_config.scl_pullup = true;
+    let (twim, motion_known) =
+        device::i2c::prepare(p.TWISPI1, p.P0_06, p.P0_07, SENSOR_TX_BUFFER.init([0; 32])).await;
+    let sensor_bus = SENSOR_BUS.init(AsyncMutex::new(twim));
     let touch = device::input::TouchScreen::new(
-        Twim::new(
-            p.TWISPI1,
-            Irqs,
-            p.P0_06,
-            p.P0_07,
-            touch_config,
-            TOUCH_TX_BUFFER.init([0; 8]),
-        ),
+        device::i2c::Device::new(sensor_bus),
         Input::new(p.P0_28, Pull::Up),
         Output::new(p.P0_10, Level::High, OutputDrive::Standard),
     );
+    if motion_known {
+        spawner
+            .spawn(motion_task(
+                device::i2c::Device::new(sensor_bus),
+                SCREEN_AWAKE_WATCH.receiver().unwrap(),
+            ))
+            .unwrap();
+    }
 
     // PineTime backlight pins (active-low): P0.14, P0.22, P0.23
     let backlight_low = Output::new(p.P0_14, Level::High, OutputDrive::Standard);
@@ -634,6 +738,7 @@ async fn main(spawner: Spawner) {
     let input_rx = INPUT_CH.receiver();
     let notification_rx = NOTIFICATION_CH.receiver();
     let mut media_rx = MEDIA_WATCH.receiver().unwrap();
+    let mut motion_rx = MOTION_WATCH.receiver().unwrap();
 
     let mut last_ota = UpdateStatus::Idle;
     let mut ble_connected = false;
@@ -863,6 +968,11 @@ async fn main(spawner: Spawner) {
                 if watch_ui.set_media(state) && awake {
                     watch_ui.draw_media(&mut display);
                 }
+            }
+        }
+        if let Some(raw_steps) = motion_rx.try_changed() {
+            if watch_ui.set_steps(raw_steps) && awake {
+                watch_ui.draw_steps(&mut display);
             }
         }
         if let Some(request) = watch_ui.take_media_request() {

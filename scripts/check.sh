@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 defmt-print --version
+sha256sum --check src/device/bosch/SHA256SUMS
 cargo fmt --check
 cargo fmt --manifest-path tests/host/Cargo.toml --check
 cargo test --locked --manifest-path tests/host/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')"

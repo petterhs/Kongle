@@ -1,7 +1,13 @@
 # Step measurement for Kongle 0.4.0
 
-Status: investigation and implementation plan; no motion driver is enabled in
-the current UI build. Goal: reliable wrist-worn counting with low idle cost,
+Status: the maintainer verified BMA421 startup (chip ID `0x11`, configuration
+`0x0071`, accel `0x28`, range `0x00`), raw count changes and working touch after
+the sensor-reset fix. Shaking is only a responsiveness check, not an accuracy
+test. `feature/sensor-foundation` now adds RAM daily accounting and the read-only
+InfiniTime step-count BLE field; these additions need hardware testing.
+Persistence, gait accuracy and power validation remain open. The dev watch's
+HR sensor has fallen off; heart-rate hardware tests require a closed device.
+Goal: reliable wrist-worn counting with low idle cost,
 documented limitations and reproducible tests. Improvement over another firmware
 must be demonstrated on measured cases, not inferred from a rewritten driver.
 
@@ -33,8 +39,9 @@ reproducible source provenance rather than depending on an unverified mirror.
   and each battery-powered test watch. Unknown chips fail closed for step data;
   do not return a convincing zero or upload a guessed feature blob.
 - Confirm schematic address/IRQ wiring and share I2C with touch and future HRM.
-  Touch currently owns TWIM1. Introduce serialized transactions and keep IRQ
-  waits outside the bus lock. Audit reset/bus recovery behavior, timeouts and
+  Touch and motion now share TWIM1 through Embassy's asynchronous I2cDevice;
+  transactions are serialized and touch IRQ waits stay outside the bus lock.
+  Audit reset/bus recovery behavior, timeouts and
   the effect on the touch controller before adding sensor startup.
 - Select a matching Bosch feature configuration with recorded source revision
   and checksum. Check all bus errors and feature-engine initialization status.
@@ -45,6 +52,75 @@ reproducible source provenance rather than depending on an unverified mirror.
 
 Deliverable: a minimal Rust driver that initializes the identified part and
 reports a raw cumulative hardware counter, with independent transport tests.
+
+### Current hardware test
+
+The earlier read-only probe identified the dev sensor as `0x11` at address
+`0x18`. The active build calls `Motion::initialize` with an eight-second timeout.
+It uses the unchanged 6144-byte streams for IDs 0x11/0x13 with documented hashes
+and BSD notices in `src/device/bosch/`. ASIC status, feature enable readback,
+acceleration configuration and power registers must pass before counts are
+published. Unknown chips receive no writes, including during error cleanup.
+
+Flash from `/tmp/kongle-sensors` using the normal development feature set:
+
+```sh
+KONGLE_FEATURES=mcuboot,ota-activation,touch-wake-debug bash scripts/flash_app.sh
+```
+
+Capture `[motion] ... ready; config ID ..., accel 28, range 00` followed by
+`[motion] raw steps: ...`, or the initialization error. Check touch, BLE and
+screen sleep/wake during and after initialization. Test a small counted walk
+and wait for delayed/batched sensor reporting. RTT logs retain raw sensor counts.
+The UI displays session steps until CTS sync, then the partial daily total.
+Activity distinguishes these and shows undated steps. Each firmware boot resets
+the sensor and RAM totals. The read-only Motion Service returns the daily total
+as u32 LE, and an ATT error when the sensor/time/current-date sample is missing.
+
+The first active hardware test failed with the old generic `Readback` error;
+touch continued to work. Initialization now follows Bosch's APS handoff after
+configuration loading before fetching the feature-window pointer. This did not
+fix the hardware failure: the next test reported `start: 3064, config_id: 0`,
+with feature bytes remaining zero. 3064 is exactly the final upload word address
+(`(6144 - 16) / 2`), consistent with attempting to reinitialize an ASIC that
+retained its old state across an MCU reset.
+Failures now identify `FeatureAddress`, `FeatureReadback` (start pointer,
+configuration ID, expected/actual bytes) or `RegisterReadback` (register, mask,
+expected/actual value), rather than concealing which check failed. These checks
+remain strict; diagnostic detail is not a reason to accept invalid settings.
+
+The shared TWIM buffer now holds 32 bytes. Reads happen every five seconds
+awake and thirty seconds asleep, plus screen-state transitions; counting stays
+on the sensor. This polling is a baseline, not a final power optimization.
+First time sync and date changes trigger an extra sample without polling time
+over I2C. Date changes never reset the hardware counter. The default boot clock
+does not count as synchronized: a valid CTS write must reach the clock task.
+Read errors publish unavailable rather than zero. Three consecutive errors stop
+acquisition without resetting the shared bus or touch. Initialization/read
+operations and best-effort shutdown have bounded timeouts.
+
+Transport tests exercise both variants, upload failure, bad ASIC status,
+unknown chips, feature readback failure and lost engine state. They establish
+protocol handling, not physical initialization or counting accuracy. UI tests
+check that count updates leave other regions/pages unchanged. Bosch notices
+accompany the raw MCUBoot build output and are included in the DFU ZIP.
+
+Startup now probes a known chip and sends soft reset before the shared bus or
+touch tasks are created. A temporary TWIM driver uses bounded 20 ms blocking
+transactions at this stage, then is dropped even on timeout. Buffers remain
+alive until TWIM is disabled. After a 200 ms settling delay, TWIM is recreated
+using owned/reborrowed peripherals without register access behind the HAL.
+The motion driver requires fresh ASIC status zero before any upload; a stale
+success status is `NeedsReset`, not proof that our own initialization succeeded.
+Unknown chips receive no reset. Touch still starts if probing fails.
+
+The [Bosch BMA423 data sheet, section 4.2](https://www.bndhep.net/Electronics/Data/BMA423.pdf)
+requires INIT_CTRL initialization only once per power-on/soft reset. The
+PineTime [reference startup](https://github.com/InfiniTimeOrg/InfiniTime/blob/9ad16304f5fd526b781a760cf1313813d232645e/src/drivers/Bma421.cpp)
+also requires sensor reset plus TWI recovery. The changed startup still needs
+hardware validation, including repeated MCU resets, touch, BLE and OTA/trial
+handoff. Host tests now reject a previously initialized ASIC before any upload.
+Do not assume successful cold initialization proves warm startup behavior.
 
 ## 2. Establish a baseline before tuning
 
@@ -124,6 +200,23 @@ read by Furu (`00030000-…` / `00030001-…`, u32 LE). Send source/reset/time m
 through a separately versioned capability if needed for history; Furu must not
 double-count the same sample after reconnect. Keep diagnostics available for
 test runs without making the ordinary watch UI a debug console.
+
+The initial RAM implementation keeps three date buckets so moving the clock
+backward and forward does not erase/recount recent totals. Older buckets are
+evicted; this is not historical storage. Counts before first time sync and
+batches spanning a date transition go to an undated total, because the hardware
+counter has no per-step timestamps. This can omit up to a polling interval's
+worth of steps from a daily total at midnight/clock correction; those steps
+remain in the session/undated accounting instead of being assigned arbitrarily.
+There is no promise of a complete day after boot or time sync.
+
+Counter resets/corruption are rejected using a broad cadence-plus-batch sanity
+bound, then rebased without inventing a huge unsigned delta. Normal unsigned
+wrap is handled; this guard is not gait tuning. Failed reads publish unavailable
+but preserve the previous baseline so a later successful read recovers its
+delta. Pure tests cover sync, midnight, backward dates, missing reads, wrap,
+counter resets and stale-date BLE reads. Furu's companion sensor branch enables
+its existing step capability and clears stale step values on read errors.
 
 ## 6. Power and release gate
 

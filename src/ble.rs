@@ -45,6 +45,15 @@ struct Server {
     battery_service: BatteryService,
     battery_history: BatteryHistoryService,
     music: MusicService,
+    motion: MotionService,
+}
+
+/// InfiniTime step-count field, u32 little-endian. Daily total is valid only
+/// after clock sync and a successful sensor sample for the current date.
+#[gatt_service(uuid = "00030000-78fc-48fe-8e23-433b3a1942d0")]
+struct MotionService {
+    #[characteristic(uuid = "00030001-78fc-48fe-8e23-433b3a1942d0", read)]
+    steps: [u8; 4],
 }
 
 /// InfiniTime music protocol. Numeric metadata is big-endian, unlike CTS.
@@ -346,6 +355,24 @@ async fn gatt_events_and_time_sync_task<P: PacketPool, S: SpiDevice<u8>>(
                     GattConnectionEvent::Gatt { event } => {
                         let mut dfu_reply = None;
                         let error = match &event {
+                            GattEvent::Read(read)
+                                if read.handle() == server.motion.steps.handle =>
+                            {
+                                let date = crate::STEP_DATE.try_get().flatten();
+                                match crate::MOTION_WATCH
+                                    .try_get()
+                                    .and_then(|state| state.gatt_value(date))
+                                {
+                                    Some(value) => {
+                                        if server.set(&server.motion.steps, &value).is_err() {
+                                            Some(AttErrorCode::UNLIKELY_ERROR)
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    None => Some(AttErrorCode::UNLIKELY_ERROR),
+                                }
+                            }
                             GattEvent::Write(write)
                                 if music_field(server, write.handle()).is_some() =>
                             {

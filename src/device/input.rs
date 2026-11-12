@@ -1,9 +1,8 @@
+use super::i2c::{Device, Error};
 use defmt::Format;
-use embassy_nrf::{
-    gpio::{Input, Output},
-    twim::{self, Twim},
-};
+use embassy_nrf::gpio::{Input, Output};
 use embassy_time::{Duration, Timer};
+use embedded_hal_async::i2c::I2c;
 
 use crate::touch::{self, TouchEvent};
 
@@ -53,7 +52,7 @@ impl<'d> Button<'d> {
 /// PineTime CST816S on TWIM1. IRQ is active low; register 0x01 reports the
 /// gesture and registers 0x03..0x06 report its position.
 pub struct TouchScreen<'d> {
-    twim: Twim<'d>,
+    twim: Device<'d>,
     irq: Input<'d>,
     reset: Output<'d>,
 }
@@ -61,11 +60,11 @@ pub struct TouchScreen<'d> {
 impl<'d> TouchScreen<'d> {
     const ADDRESS: u8 = 0x15;
 
-    pub fn new(twim: Twim<'d>, irq: Input<'d>, reset: Output<'d>) -> Self {
+    pub fn new(twim: Device<'d>, irq: Input<'d>, reset: Output<'d>) -> Self {
         Self { twim, irq, reset }
     }
 
-    pub async fn init(&mut self) -> Result<u8, twim::Error> {
+    pub async fn init(&mut self) -> Result<u8, Error> {
         self.reset.set_low();
         Timer::after(Duration::from_millis(5)).await;
         self.reset.set_high();
@@ -96,11 +95,11 @@ impl<'d> TouchScreen<'d> {
     }
 
     /// Stop touch scanning while the display sleeps in normal builds.
-    pub async fn sleep(&mut self) -> Result<(), twim::Error> {
+    pub async fn sleep(&mut self) -> Result<(), Error> {
         self.twim.write(Self::ADDRESS, &[0xa5, 0x03]).await
     }
 
-    pub async fn next(&mut self) -> Result<Option<TouchEvent>, twim::Error> {
+    pub async fn next(&mut self) -> Result<Option<TouchEvent>, Error> {
         // Use the pin's level-sensitive PORT event. The dedicated GPIOTE
         // channel wait path panicked after a gesture on the development watch.
         // The CST816S can hold IRQ low after a read. Require it to return high

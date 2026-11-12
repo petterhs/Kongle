@@ -199,6 +199,7 @@ pub struct WatchUi {
     ble_address: Option<[u8; 6]>,
     media: crate::media::State,
     media_request: Option<crate::media::Request>,
+    steps: crate::steps::State,
 }
 
 impl WatchUi {
@@ -220,6 +221,7 @@ impl WatchUi {
             ble_address: None,
             media: crate::media::State::new(),
             media_request: None,
+            steps: crate::steps::State::EMPTY,
         }
     }
 
@@ -261,6 +263,77 @@ impl WatchUi {
         let changed = self.media != state;
         self.media = state;
         changed
+    }
+
+    pub fn set_steps(&mut self, steps: crate::steps::State) -> bool {
+        let changed = self.steps != steps;
+        self.steps = steps;
+        changed
+    }
+
+    pub fn draw_steps<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+        match self.navigation.page() {
+            Page::Clock => {
+                if !self.skip_clear {
+                    let _ = Rectangle::new(Point::new(10, 169), Size::new(220, 30))
+                        .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
+                        .draw(display);
+                }
+                self.draw_statuses(display);
+            }
+            Page::Activity => {
+                if !self.skip_clear {
+                    let _ = Rectangle::new(Point::new(16, 32), Size::new(208, 180))
+                        .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
+                        .draw(display);
+                }
+                let style = MonoTextStyleBuilder::new()
+                    .font(&FONT_10X20)
+                    .text_color(theme::TEXT)
+                    .background_color(theme::BACKGROUND)
+                    .build();
+                let mut count: String<10> = String::new();
+                if let Some(steps) = self.steps.displayed() {
+                    let _ = write!(&mut count, "{}", steps);
+                } else {
+                    let _ = count.push_str("--");
+                }
+                let _ = Text::new(&count, Point::new(20, 60), style).draw(display);
+                let _ = Text::new(
+                    if self.steps.daily.is_some() {
+                        self.tr("Today", "I dag")
+                    } else if self.steps.session.is_some() {
+                        self.tr("Since boot", "Siden oppstart")
+                    } else {
+                        self.tr("Steps unavailable", "Skritt utilgjengelig")
+                    },
+                    Point::new(20, 100),
+                    style,
+                )
+                .draw(display);
+                let _ = Text::new(
+                    if self.steps.daily.is_some() {
+                        self.tr("RAM only", "Kun i RAM")
+                    } else if self.steps.session.is_none() {
+                        self.tr("Sensor unavailable", "Sensor utilgjengelig")
+                    } else {
+                        self.tr("Clock not synced", "Tid ikke synket")
+                    },
+                    Point::new(20, 134),
+                    style,
+                )
+                .draw(display);
+                let mut unassigned: String<20> = String::new();
+                let _ = write!(
+                    &mut unassigned,
+                    "{}: {}",
+                    self.tr("Undated", "Udatert"),
+                    self.steps.unassigned
+                );
+                let _ = Text::new(&unassigned, Point::new(20, 180), style).draw(display);
+            }
+            _ => {}
+        }
     }
 
     pub fn handle_touch(&mut self, event: TouchEvent) -> bool {
@@ -477,14 +550,24 @@ impl WatchUi {
     }
 
     fn draw_statuses<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
-        // The first local field awaits the step source. Remote fields are
-        // omitted until an integration explicitly enables them.
+        // Remote fields are omitted until an integration enables them.
         let style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
-            .text_color(theme::MUTED)
+            .text_color(if self.steps.displayed().is_some() {
+                theme::STEPS
+            } else {
+                theme::MUTED
+            })
             .background_color(theme::BACKGROUND)
             .build();
-        let _ = Text::with_baseline("--", Point::new(44, 175), style, Baseline::Top).draw(display);
+        let mut count: String<10> = String::new();
+        if let Some(steps) = self.steps.displayed() {
+            let _ = write!(&mut count, "{}", steps);
+        } else {
+            let _ = count.push_str("--");
+        }
+        let _ =
+            Text::with_baseline(&count, Point::new(44, 175), style, Baseline::Top).draw(display);
         draw_icon::<D, Walking>(display, Point::new(14, 171), theme::STEPS);
     }
 
@@ -840,15 +923,7 @@ impl WatchUi {
                 )
                 .draw(display);
             }
-            Page::Activity => {
-                let _ = Text::new("--", Point::new(20, 60), accent).draw(display);
-                let _ = Text::new(
-                    self.tr("Steps unavailable", "Skritt utilgjengelig"),
-                    Point::new(20, 100),
-                    style,
-                )
-                .draw(display);
-            }
+            Page::Activity => self.draw_steps(display),
             Page::Home => {
                 for (label, x, y) in [
                     (self.tr("Living", "Stue"), 16, 34),
