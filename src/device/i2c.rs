@@ -12,6 +12,50 @@ pub type Bus = Mutex<CriticalSectionRawMutex, Twim<'static>>;
 pub type Device<'a> = I2cDevice<'a, CriticalSectionRawMutex, Twim<'static>>;
 pub type Error = embassy_embedded_hal::shared_bus::I2cDeviceError<embassy_nrf::twim::Error>;
 
+/// HR uses finite transfers rather than cancelling an in-flight EasyDMA
+/// future on timeout. This holds the shared lock only for one transaction;
+/// the normal eight-byte sample takes about a millisecond at 100 kHz.
+pub struct BoundedDevice<'a> {
+    bus: &'a Bus,
+}
+
+impl<'a> BoundedDevice<'a> {
+    pub fn new(bus: &'a Bus) -> Self {
+        Self { bus }
+    }
+}
+
+impl embedded_hal::i2c::ErrorType for BoundedDevice<'_> {
+    type Error = embassy_nrf::twim::Error;
+}
+
+impl embedded_hal_async::i2c::I2c for BoundedDevice<'_> {
+    async fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut [embedded_hal::i2c::Operation<'_>],
+    ) -> Result<(), Self::Error> {
+        let mut bus = self.bus.lock().await;
+        let result =
+            bus.blocking_transaction_timeout(address, operations, Duration::from_millis(10));
+        if result == Err(embassy_nrf::twim::Error::Timeout) {
+            // We exclusively own TWIM1 through the mutex. Disable DMA before
+            // the borrowed sample buffers can leave scope, then recover the
+            // controller. Never steal peripherals or reset the touch chip.
+            let regs = embassy_nrf::pac::TWIM1;
+            use embassy_nrf::pac::twim::vals::Enable;
+            regs.enable().write(|w| w.set_enable(Enable::DISABLED));
+            cortex_m::asm::dsb();
+            regs.intenclr().write(|w| w.0 = 0xffff_ffff);
+            regs.events_stopped().write_value(0);
+            regs.events_suspended().write_value(0);
+            regs.events_error().write_value(0);
+            regs.enable().write(|w| w.set_enable(Enable::ENABLED));
+        }
+        result
+    }
+}
+
 fn config() -> Config {
     let mut config = Config::default();
     config.sda_pullup = true;

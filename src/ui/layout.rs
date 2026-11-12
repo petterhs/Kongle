@@ -11,6 +11,7 @@ pub const BATTERY_PERCENT: Rectangle = Rectangle::new(Point::new(16, 34), Size::
 pub const LANGUAGE: Rectangle = Rectangle::new(Point::new(16, 94), Size::new(208, 74));
 pub const ABOUT: Rectangle = Rectangle::new(Point::new(16, 34), Size::new(208, 50));
 pub const FIRMWARE: Rectangle = Rectangle::new(Point::new(16, 86), Size::new(208, 50));
+pub const HEART_MEASURE: Rectangle = Rectangle::new(Point::new(16, 148), Size::new(208, 50));
 
 pub fn tapped(event: TouchEvent, rect: Rectangle) -> bool {
     match event {

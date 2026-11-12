@@ -11,6 +11,189 @@ use crate::{
 use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
 
 #[test]
+fn pulse_requires_explicit_start_and_all_page_exits_request_stop() {
+    use crate::heart_rate::{Phase, Reading, State};
+    for exit in 0..5 {
+        let mut ui = WatchUi::new();
+        assert!(ui.handle_touch(TouchEvent::Tap { x: 170, y: 180 }));
+        assert!(ui.heart_visible());
+        assert_eq!(ui.take_heart_request(), None);
+        assert!(!ui.handle_touch(TouchEvent::Tap { x: 50, y: 170 }));
+        assert_eq!(ui.take_heart_request(), Some(true));
+        ui.set_heart(
+            State {
+                phase: Phase::Measuring,
+                last: Some(Reading {
+                    bpm: 72,
+                    at_ms: 5000,
+                }),
+                started_ms: 0,
+            },
+            5000,
+        );
+        match exit {
+            0 => {
+                ui.handle_touch(TouchEvent::SwipeRight);
+            }
+            1 => {
+                ui.handle_button(true);
+            }
+            2 => {
+                ui.show_clock();
+            }
+            3 => {
+                ui.open_media();
+            }
+            _ => {
+                ui.receive_notification(parse_new_alert(b"\0\x01\0Mail\0Hi").unwrap(), true);
+            }
+        }
+        assert!(!ui.heart_visible());
+        assert_eq!(ui.take_heart_request(), Some(false));
+    }
+    let mut ui = WatchUi::new();
+    ui.handle_touch(TouchEvent::Tap { x: 170, y: 180 });
+    ui.handle_touch(TouchEvent::Tap { x: 50, y: 170 });
+    ui.handle_button(true); // Exit before the owner even consumes Start.
+    assert_eq!(ui.take_heart_request(), Some(false));
+}
+
+#[test]
+fn pulse_updates_preserve_panel_and_button_borders_and_fit_both_languages() {
+    use crate::heart_rate::{Phase, Reading, State};
+    let mut ui = WatchUi::new();
+    ui.handle_touch(TouchEvent::Tap { x: 170, y: 180 });
+    let mut frame = Frame::new();
+    render(&mut ui, &mut frame);
+    let before = frame.pixels.clone();
+    ui.set_heart(
+        State {
+            phase: Phase::Measuring,
+            last: Some(Reading {
+                bpm: 72,
+                at_ms: 5000,
+            }),
+            started_ms: 0,
+        },
+        5000,
+    );
+    ui.draw_heart(&mut frame);
+    for (index, (old, new)) in before.iter().zip(&frame.pixels).enumerate() {
+        let x = index % 240;
+        let y = index / 240;
+        let field =
+            (18..222).contains(&x) && ([40..68, 76..104, 108..136].iter().any(|r| r.contains(&y)));
+        let button_label = (28..208).contains(&x) && (158..186).contains(&y);
+        if !field && !button_label {
+            assert_eq!(old, new, "pulse overwrote {},{}", x, y);
+        }
+    }
+    ui.show_clock();
+    ui.handle_touch(TouchEvent::SwipeUp);
+    ui.handle_touch(TouchEvent::Tap { x: 50, y: 160 }); // Display.
+    ui.handle_touch(TouchEvent::Tap { x: 50, y: 120 }); // Bokmål.
+    ui.show_clock();
+    ui.handle_touch(TouchEvent::Tap { x: 170, y: 180 });
+    for phase in [
+        Phase::Idle,
+        Phase::Measuring,
+        Phase::NoSignal,
+        Phase::Missing,
+        Phase::Fault,
+    ] {
+        ui.set_heart(
+            State {
+                phase,
+                last: Some(Reading {
+                    bpm: 220,
+                    at_ms: 1000,
+                }),
+                started_ms: 0,
+            },
+            99_999_999,
+        );
+        render(&mut ui, &mut frame);
+    }
+    ui.open_media();
+    render(&mut ui, &mut frame);
+    let before = frame.pixels.clone();
+    ui.set_heart(
+        State {
+            phase: Phase::Measuring,
+            last: Some(Reading {
+                bpm: 72,
+                at_ms: 1000,
+            }),
+            started_ms: 0,
+        },
+        1000,
+    );
+    ui.draw_heart(&mut frame);
+    assert_eq!(before, frame.pixels);
+    assert_eq!(frame.clipped, 0);
+}
+
+#[test]
+fn pulse_quality_messages_fit_without_redrawing_the_panel_in_both_languages() {
+    use crate::heart_rate::{Phase, Quality, Reason, State};
+    for norwegian in [false, true] {
+        let mut ui = WatchUi::new();
+        if norwegian {
+            ui.handle_touch(TouchEvent::SwipeUp);
+            ui.handle_touch(TouchEvent::Tap { x: 50, y: 160 });
+            ui.handle_touch(TouchEvent::Tap { x: 50, y: 120 });
+            ui.show_clock();
+        }
+        ui.handle_touch(TouchEvent::Tap { x: 170, y: 180 });
+        ui.set_heart(
+            State {
+                phase: Phase::Measuring,
+                ..State::EMPTY
+            },
+            1000,
+        );
+        let mut frame = Frame::new();
+        render(&mut ui, &mut frame);
+        let before = frame.pixels.clone();
+        for reason in [
+            Reason::WarmingUp,
+            Reason::TimingGap,
+            Reason::NonMonotonic,
+            Reason::Dark,
+            Reason::Clipped,
+            Reason::AmbientClipped,
+            Reason::InsufficientCoverage,
+            Reason::LowAmplitude,
+            Reason::PoorSpectrum,
+            Reason::Ambiguous,
+            Reason::OutOfRange,
+            Reason::NotPeriodic,
+            Reason::Confirming,
+            Reason::Valid,
+        ] {
+            ui.set_heart_quality(Quality {
+                reason,
+                filled: 80,
+                confirmation: 3,
+                ..Quality::EMPTY
+            });
+            ui.draw_heart(&mut frame);
+            assert_eq!(frame.clipped, 0, "{reason:?}, norwegian={norwegian}");
+            for (index, (old, new)) in before.iter().zip(&frame.pixels).enumerate() {
+                let x = index % 240;
+                let y = index / 240;
+                let field = (18..222).contains(&x)
+                    && [40..68, 76..104, 108..136].iter().any(|r| r.contains(&y));
+                let button = (28..208).contains(&x) && (158..186).contains(&y);
+                if !field && !button {
+                    assert_eq!(old, new, "{reason:?} overwrote {x},{y}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn live_steps_only_redraw_their_region_and_never_overwrite_media() {
     let mut ui = WatchUi::new();
     let mut frame = Frame::new();

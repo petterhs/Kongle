@@ -18,6 +18,8 @@ mod firmware_confirm;
 mod firmware_state;
 mod flash;
 mod haptics;
+mod heart_rate;
+mod hrs3300;
 mod media;
 mod motion;
 mod notifications;
@@ -45,6 +47,7 @@ use embassy_nrf::{
 };
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex as BlockingMutex};
 use embassy_sync::mutex::Mutex as AsyncMutex;
+use embassy_sync::signal::Signal;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_graphics::prelude::*;
@@ -116,6 +119,9 @@ static MEDIA_COMMANDS: Channel<CriticalSectionRawMutex, media::Request, 4> = Cha
 static SCREEN_AWAKE_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
 static MOTION_WATCH: Watch<CriticalSectionRawMutex, steps::State, 1> = Watch::new();
 static STEP_DATE: Watch<CriticalSectionRawMutex, Option<chrono::NaiveDate>, 1> = Watch::new();
+static HEART_STATE: Watch<CriticalSectionRawMutex, heart_rate::State, 1> = Watch::new();
+static HEART_DIAGNOSTICS: Watch<CriticalSectionRawMutex, heart_rate::Diagnostics, 1> = Watch::new();
+static HEART_REQUEST: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 static VIBRATIONS: Channel<CriticalSectionRawMutex, haptics::Pattern, 4> = Channel::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
 static FLASH_CELL: StaticCell<AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>> =
@@ -469,6 +475,184 @@ async fn motion_task(
     }
 }
 
+fn heart_error(error: &hrs3300::Error<embassy_nrf::twim::Error>) -> u8 {
+    match error {
+        hrs3300::Error::Bus(_) => 1,
+        hrs3300::Error::WrongId(_) => 2,
+        hrs3300::Error::NotRunning => 3,
+        hrs3300::Error::InvalidGain(_) => 4,
+        hrs3300::Error::Readback { register, .. } => 0x80 | register,
+    }
+}
+
+async fn stop_heart(
+    sensor: &mut hrs3300::Hrs3300<device::i2c::BoundedDevice<'_>>,
+    diagnostic: &mut heart_rate::Diagnostics,
+) -> bool {
+    for attempt in 0..3 {
+        match sensor.stop().await {
+            Ok(()) => return true,
+            Err(error) => {
+                diagnostic.error = heart_error(&error);
+                defmt::warn!(
+                    "[hr] shutdown attempt {}: {:?}",
+                    attempt + 1,
+                    defmt::Debug2Format(&error)
+                );
+                Timer::after(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    false
+}
+
+#[embassy_executor::task]
+async fn heart_task(bus: &'static device::i2c::Bus) {
+    use heart_rate::{Estimator, Phase, Reading, State, SAMPLE_MS};
+    let mut sensor = hrs3300::Hrs3300::new(device::i2c::BoundedDevice::new(bus));
+    let sender = HEART_STATE.sender();
+    let mut state = State::EMPTY;
+    let mut diagnostic = heart_rate::Diagnostics::EMPTY;
+    match sensor.probe().await {
+        Ok(()) => defmt::info!("[hr] HRS3300 detected and powered down"),
+        Err(error) => {
+            defmt::warn!("[hr] sensor unavailable: {:?}", defmt::Debug2Format(&error));
+            state.phase = Phase::Missing;
+            diagnostic.error = heart_error(&error);
+            if !stop_heart(&mut sensor, &mut diagnostic).await {
+                state.phase = Phase::Fault;
+            }
+        }
+    }
+    sender.send(state);
+    HEART_DIAGNOSTICS.sender().send(diagnostic);
+    loop {
+        if !HEART_REQUEST.wait().await {
+            continue;
+        }
+        diagnostic = heart_rate::Diagnostics::EMPTY;
+        if let Err(error) = sensor.start().await {
+            defmt::warn!("[hr] start failed: {:?}", defmt::Debug2Format(&error));
+            state.phase = Phase::Fault;
+            diagnostic.error = heart_error(&error);
+            let _ = stop_heart(&mut sensor, &mut diagnostic).await;
+            sender.send(state);
+            HEART_DIAGNOSTICS.sender().send(diagnostic);
+            continue;
+        }
+        state.phase = Phase::Measuring;
+        state.started_ms = Instant::now().as_millis();
+        diagnostic.gain = hrs3300::MEASUREMENT_GAIN;
+        sender.send(state);
+        defmt::info!(
+            "[hr] measuring; 15-bit, 10 Hz, gain x{}, 12.5 mA drive; 45 second limit",
+            hrs3300::MEASUREMENT_GAIN
+        );
+        let mut estimator = Estimator::new();
+        HEART_DIAGNOSTICS.sender().send(diagnostic);
+        let mut window_min = u32::MAX;
+        let mut window_max = 0u32;
+        let settle_until = state.started_ms + 200;
+        let mut next_sample = Instant::now() + Duration::from_millis(SAMPLE_MS);
+        let mut publish_at = Instant::now();
+        let mut timed_out = false;
+        let mut failed = false;
+        loop {
+            if HEART_REQUEST.try_take() == Some(false) {
+                break;
+            }
+            match embassy_futures::select::select(HEART_REQUEST.wait(), Timer::at(next_sample))
+                .await
+            {
+                embassy_futures::select::Either::First(false) => break,
+                embassy_futures::select::Either::First(true) => continue,
+                embassy_futures::select::Either::Second(_) => {}
+            }
+            let now = Instant::now();
+            if state.expired(now.as_millis()) {
+                timed_out = true;
+                break;
+            }
+            match sensor.sample().await {
+                Ok(sample) => {
+                    // Timestamp the completed read, including any shared-bus
+                    // wait, rather than pretending it happened at timer wakeup.
+                    let now = Instant::now();
+                    if state.expired(now.as_millis()) {
+                        timed_out = true;
+                        break;
+                    }
+                    diagnostic.ppg = sample.ppg;
+                    diagnostic.ambient = sample.ambient;
+                    diagnostic.samples = diagnostic.samples.saturating_add(1);
+                    diagnostic.at_ms = now.as_millis();
+                    if now.as_millis() >= settle_until {
+                        window_min = window_min.min(sample.ppg);
+                        window_max = window_max.max(sample.ppg);
+                        diagnostic.min = window_min.min(u32::from(u16::MAX)) as u16;
+                        diagnostic.max = window_max.min(u32::from(u16::MAX)) as u16;
+                        let analysis_at = Instant::now();
+                        let reading = estimator.sample(sample.ppg, sample.ambient, now.as_millis());
+                        diagnostic.quality = estimator.quality();
+                        let analysis_ms = Instant::now().duration_since(analysis_at).as_millis();
+                        if analysis_ms >= 10 {
+                            defmt::debug!("[hr] analysis took {} ms", analysis_ms);
+                        }
+                        if let Some(bpm) = reading {
+                            state.last = Some(Reading {
+                                bpm,
+                                at_ms: now.as_millis(),
+                            });
+                            defmt::info!("[hr] pulse candidate: {} BPM", bpm);
+                            // Publish a newly qualified reading immediately;
+                            // the independent housekeeping phase can lag it.
+                            sender.send(state);
+                            publish_at = Instant::now() + Duration::from_secs(1);
+                        }
+                    }
+                    if now >= publish_at {
+                        sender.send(state);
+                        window_min = u32::MAX;
+                        window_max = 0;
+                        defmt::debug!("[hr] PPG {}, ambient {}", sample.ppg, sample.ambient);
+                        publish_at = now + Duration::from_secs(1);
+                    }
+                    // Latest-value debug stream; no queue or raw sample history.
+                    // Only an explicitly subscribed diagnostic client transmits it.
+                    HEART_DIAGNOSTICS.sender().send(diagnostic);
+                }
+                Err(error) => {
+                    diagnostic.error = heart_error(&error);
+                    defmt::warn!("[hr] sample failed: {:?}", defmt::Debug2Format(&error));
+                    failed = true;
+                    break;
+                }
+            }
+            // No catch-up burst: skipped samples reset estimator timing.
+            next_sample += Duration::from_millis(SAMPLE_MS);
+            if next_sample <= Instant::now() {
+                next_sample = Instant::now() + Duration::from_millis(SAMPLE_MS);
+            }
+        }
+        let had_signal = state.bpm(Instant::now().as_millis()).is_some();
+        state.phase = if failed {
+            Phase::Fault
+        } else if timed_out && !had_signal {
+            Phase::NoSignal
+        } else {
+            Phase::Idle
+        };
+        // Every exit path attempts LED+engine shutdown before publishing idle.
+        if stop_heart(&mut sensor, &mut diagnostic).await {
+            defmt::info!("[hr] sensor and LED drive off");
+        } else {
+            state.phase = Phase::Fault;
+        }
+        sender.send(state);
+        HEART_DIAGNOSTICS.sender().send(diagnostic);
+    }
+}
+
 #[embassy_executor::task]
 async fn run_controller(controller_task: apache_nimble::controller::NimbleControllerTask) {
     controller_task.run().await
@@ -592,6 +776,7 @@ async fn main(spawner: Spawner) {
     let (twim, motion_known) =
         device::i2c::prepare(p.TWISPI1, p.P0_06, p.P0_07, SENSOR_TX_BUFFER.init([0; 32])).await;
     let sensor_bus = SENSOR_BUS.init(AsyncMutex::new(twim));
+    spawner.spawn(heart_task(sensor_bus)).unwrap();
     let touch = device::input::TouchScreen::new(
         device::i2c::Device::new(sensor_bus),
         Input::new(p.P0_28, Pull::Up),
@@ -746,6 +931,8 @@ async fn main(spawner: Spawner) {
     let mut sleep_at = Instant::now() + Duration::from_secs(30);
     let mut redraw = false;
     let mut pending_button_sleep = false;
+    let mut heart_page_was_open = false;
+    let mut heart_was_measuring = false;
     loop {
         match embassy_futures::select::select(
             ota_rx.changed(),
@@ -971,10 +1158,47 @@ async fn main(spawner: Spawner) {
             }
         }
         if let Some(raw_steps) = motion_rx.try_changed() {
-            if watch_ui.set_steps(raw_steps) && awake {
+            if watch_ui.set_steps(raw_steps) && awake && !redraw {
                 watch_ui.draw_steps(&mut display);
             }
         }
+        let heart_state = HEART_STATE.try_get().unwrap_or(heart_rate::State::EMPTY);
+        let heart_measuring = heart_state.phase == heart_rate::Phase::Measuring;
+        if awake && watch_ui.heart_visible() {
+            if heart_measuring && !heart_state.expired(Instant::now().as_millis()) {
+                sleep_at = sleep_at.max(Instant::now() + Duration::from_secs(2));
+            } else if heart_was_measuring && !heart_measuring {
+                sleep_at = Instant::now() + Duration::from_secs(30);
+            }
+        }
+        heart_was_measuring = heart_measuring;
+        let heart_changed = watch_ui.set_heart(heart_state, Instant::now().as_millis());
+        let quality_changed = watch_ui.set_heart_quality(
+            HEART_DIAGNOSTICS
+                .try_get()
+                .unwrap_or(heart_rate::Diagnostics::EMPTY)
+                .quality,
+        );
+        if (heart_changed || quality_changed) && awake && !redraw {
+            watch_ui.draw_heart(&mut display);
+        }
+        if let Some(start) = watch_ui.take_heart_request() {
+            if !start
+                || (watch_ui.heart_visible()
+                    && !matches!(
+                        last_ota,
+                        UpdateStatus::Erasing
+                            | UpdateStatus::Receiving { .. }
+                            | UpdateStatus::Validating
+                    ))
+            {
+                HEART_REQUEST.signal(start);
+            }
+        }
+        if heart_page_was_open && !watch_ui.heart_visible() {
+            HEART_REQUEST.signal(false);
+        }
+        heart_page_was_open = watch_ui.heart_visible();
         if let Some(request) = watch_ui.take_media_request() {
             if MEDIA_COMMANDS.try_send(request).is_err() {
                 defmt::warn!("[media] command queue full");
@@ -991,6 +1215,7 @@ async fn main(spawner: Spawner) {
         }
         if !awake {
             if !display.is_sleeping() {
+                HEART_REQUEST.signal(false);
                 backlight.off();
                 display.sleep(&mut DeferredDelay).unwrap();
                 SCREEN_AWAKE_WATCH.sender().send(false);

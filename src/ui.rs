@@ -200,6 +200,10 @@ pub struct WatchUi {
     media: crate::media::State,
     media_request: Option<crate::media::Request>,
     steps: crate::steps::State,
+    heart: crate::heart_rate::State,
+    heart_quality: crate::heart_rate::Quality,
+    heart_now_ms: u64,
+    heart_request: Option<bool>,
 }
 
 impl WatchUi {
@@ -222,6 +226,10 @@ impl WatchUi {
             media: crate::media::State::new(),
             media_request: None,
             steps: crate::steps::State::EMPTY,
+            heart: crate::heart_rate::State::EMPTY,
+            heart_quality: crate::heart_rate::Quality::EMPTY,
+            heart_now_ms: 0,
+            heart_request: None,
         }
     }
 
@@ -238,6 +246,7 @@ impl WatchUi {
     }
 
     pub fn open_media(&mut self) {
+        self.stop_heart_on_exit();
         if self.navigation.page() == Page::Notifications {
             self.has_unread = false;
         }
@@ -269,6 +278,163 @@ impl WatchUi {
         let changed = self.steps != steps;
         self.steps = steps;
         changed
+    }
+
+    pub fn heart_visible(&self) -> bool {
+        self.navigation.page() == Page::HeartRate
+    }
+
+    pub fn set_heart(&mut self, state: crate::heart_rate::State, now_ms: u64) -> bool {
+        let changed = self.heart != state
+            || self.heart.bpm(self.heart_now_ms) != state.bpm(now_ms)
+            || (self.heart_visible()
+                && self.heart.age_seconds(self.heart_now_ms) != state.age_seconds(now_ms));
+        self.heart = state;
+        self.heart_now_ms = now_ms;
+        changed
+    }
+
+    pub fn take_heart_request(&mut self) -> Option<bool> {
+        self.heart_request.take()
+    }
+
+    pub fn set_heart_quality(&mut self, quality: crate::heart_rate::Quality) -> bool {
+        let changed = self.heart_quality.reason != quality.reason
+            || self.heart_quality.filled != quality.filled
+            || self.heart_quality.confirmation != quality.confirmation;
+        self.heart_quality = quality;
+        changed && self.heart_visible()
+    }
+
+    fn stop_heart_on_exit(&mut self) {
+        if self.heart_visible() {
+            self.heart_request = Some(false);
+        }
+    }
+
+    pub fn draw_heart<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
+        let style = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(theme::HEART)
+            .background_color(theme::BACKGROUND)
+            .build();
+        let mut value: String<20> = String::new();
+        if let Some(bpm) = self.heart.bpm(self.heart_now_ms) {
+            let _ = write!(&mut value, "{}", bpm);
+        } else {
+            let _ = value.push_str("--");
+        }
+        match self.navigation.page() {
+            Page::Clock => {
+                let _ = Rectangle::new(Point::new(126, 169), Size::new(104, 30))
+                    .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
+                    .draw(display);
+                draw_icon::<D, embedded_iconoir::icons::size24px::health::Heart>(
+                    display,
+                    Point::new(128, 171),
+                    theme::HEART,
+                );
+                let _ = Text::with_baseline(&value, Point::new(158, 175), style, Baseline::Top)
+                    .draw(display);
+            }
+            Page::HeartRate => {
+                if !self.skip_clear {
+                    for y in [40, 76, 108] {
+                        let _ = Rectangle::new(Point::new(18, y), Size::new(204, 28))
+                            .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
+                            .draw(display);
+                    }
+                    let _ = Rectangle::new(Point::new(28, 158), Size::new(180, 28))
+                        .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
+                        .draw(display);
+                }
+                let _ = value.push_str(" BPM");
+                let _ = Text::new(&value, Point::new(20, 62), style).draw(display);
+                use crate::heart_rate::Phase;
+                let status = match self.heart.phase {
+                    Phase::Idle if self.heart.last.is_some() => {
+                        self.tr("Last reading", "Siste måling")
+                    }
+                    Phase::Idle => self.tr("Not measuring", "Måler ikke"),
+                    Phase::Measuring => self.tr("Hold still", "Hold deg i ro"),
+                    Phase::NoSignal => self.tr("No clear signal", "Ingen klar puls"),
+                    Phase::Missing => self.tr("Sensor unavailable", "Sensor utilgjengelig"),
+                    Phase::Fault => self.tr("Sensor error", "Sensorfeil"),
+                };
+                let _ = Text::new(status, Point::new(20, 98), style).draw(display);
+                let mut age: String<24> = String::new();
+                if self.heart.phase == Phase::Measuring
+                    && self.heart.bpm(self.heart_now_ms).is_none()
+                {
+                    use crate::heart_rate::Reason;
+                    let quality = self.heart_quality;
+                    match quality.reason {
+                        Reason::WarmingUp | Reason::TimingGap | Reason::NonMonotonic => {
+                            let _ = write!(
+                                &mut age,
+                                "{} {}/80",
+                                self.tr("Collecting", "Samler"),
+                                quality.filled
+                            );
+                        }
+                        Reason::Confirming => {
+                            let _ = write!(
+                                &mut age,
+                                "{} {}/4",
+                                self.tr("Checking", "Sjekker"),
+                                quality.confirmation.min(4)
+                            );
+                        }
+                        Reason::Dark => {
+                            let _ = age.push_str(self.tr("Check skin contact", "Sjekk hudkontakt"));
+                        }
+                        Reason::Clipped => {
+                            let _ = age.push_str(self.tr("Signal saturated", "Signal mettet"));
+                        }
+                        Reason::AmbientClipped => {
+                            let _ = age.push_str(self.tr("Too much light", "For mye lys"));
+                        }
+                        Reason::InsufficientCoverage => {
+                            let _ = age.push_str(self.tr("Sampling unstable", "Ustabil sampling"));
+                        }
+                        Reason::LowAmplitude => {
+                            let _ = age.push_str(self.tr("Signal too weak", "For svakt signal"));
+                        }
+                        _ => {
+                            let _ = age.push_str(self.tr("No clear rhythm", "Ingen tydelig puls"));
+                        }
+                    }
+                } else if let (Some(reading), Some(seconds)) =
+                    (self.heart.last, self.heart.age_seconds(self.heart_now_ms))
+                {
+                    let _ = write!(&mut age, "{} BPM / {}s", reading.bpm, seconds.min(99999));
+                } else {
+                    let _ = age.push_str(self.tr("No reading yet", "Ingen måling ennå"));
+                }
+                let _ = Text::new(&age, Point::new(20, 130), style).draw(display);
+                if self.skip_clear {
+                    let _ = RoundedRectangle::with_equal_corners(
+                        layout::HEART_MEASURE,
+                        Size::new(6, 6),
+                    )
+                    .into_styled(PrimitiveStyle::with_stroke(theme::BORDER, 2))
+                    .draw(display);
+                    let _ = Text::new(
+                        self.tr("Up to 45 seconds", "Opptil 45 sekunder"),
+                        Point::new(20, 220),
+                        style,
+                    )
+                    .draw(display);
+                }
+                let label = if self.heart.phase == Phase::Measuring {
+                    self.tr("Stop", "Stopp")
+                } else {
+                    self.tr("Measure", "Mål puls")
+                };
+                let _ = Text::new(label, Point::new(30, 180), style).draw(display);
+            }
+            _ => {}
+        }
     }
 
     pub fn draw_steps<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
@@ -337,6 +503,10 @@ impl WatchUi {
     }
 
     pub fn handle_touch(&mut self, event: TouchEvent) -> bool {
+        if self.heart_visible() && layout::tapped(event, layout::HEART_MEASURE) {
+            self.heart_request = Some(self.heart.phase != crate::heart_rate::Phase::Measuring);
+            return false;
+        }
         if self.navigation.page() == Page::Media && self.media.available() {
             if let TouchEvent::Tap { x, y: 140..=203 } = event {
                 let command = match x {
@@ -404,7 +574,11 @@ impl WatchUi {
             self.language.toggle();
             return true;
         }
+        let was_heart = self.heart_visible();
         let changed = self.navigation.handle(event);
+        if was_heart && !self.heart_visible() {
+            self.heart_request = Some(false);
+        }
         if changed && self.navigation.page() == Page::Media {
             self.request_media(crate::media::Command::Open);
         }
@@ -418,6 +592,7 @@ impl WatchUi {
         self.notifications.push(notification);
         self.has_unread = true;
         if show {
+            self.stop_heart_on_exit();
             self.firmware.cancel();
             self.navigation.notifications();
         }
@@ -432,6 +607,7 @@ impl WatchUi {
     }
 
     pub fn handle_button(&mut self, awake: bool) -> bool {
+        self.stop_heart_on_exit();
         if self.navigation.page() == Page::Notifications {
             self.has_unread = false;
         }
@@ -540,6 +716,7 @@ impl WatchUi {
 
     /// OTA progress must remain visible even if another page was open.
     pub fn show_clock(&mut self) -> bool {
+        self.stop_heart_on_exit();
         self.firmware.cancel();
         self.navigation.clock()
     }
@@ -569,6 +746,7 @@ impl WatchUi {
         let _ =
             Text::with_baseline(&count, Point::new(44, 175), style, Baseline::Top).draw(display);
         draw_icon::<D, Walking>(display, Point::new(14, 171), theme::STEPS);
+        self.draw_heart(display);
     }
 
     pub fn draw_notification_indicator<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
@@ -854,6 +1032,7 @@ impl WatchUi {
             Page::Activity => self.tr("activity", "aktivitet"),
             Page::Media => self.tr("media", "medier"),
             Page::Preferences => self.tr("display", "visning"),
+            Page::HeartRate => self.tr("heart rate", "puls"),
         };
         // Only the clock reserves a status row. Other page titles sit at the
         // top edge, with their border running down the full available height.
@@ -924,6 +1103,7 @@ impl WatchUi {
                 .draw(display);
             }
             Page::Activity => self.draw_steps(display),
+            Page::HeartRate => self.draw_heart(display),
             Page::Home => {
                 for (label, x, y) in [
                     (self.tr("Living", "Stue"), 16, 34),
