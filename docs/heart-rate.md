@@ -1,6 +1,8 @@
 # On-demand HRS3300 pulse prototype
 
-**Current test variant: `test/heart-rate-gain-x2`.** This changes only acquisition
+**Current UI test branch: `feature/heart-rate-ui`**, built on the tested
+`test/heart-rate-gain-x2` acquisition experiment. The sensor configuration
+below is unchanged by the UI work. The acquisition experiment changes only
 gain to fixed x2. LED current remains 12.5 mA, resolution 15-bit, conversion wait
 50 ms, sampling 10 Hz and DSP thresholds identical to the x1 baseline `0601db8`.
 The diagnostic gain nibble reports 2 after a successfully verified start.
@@ -31,8 +33,13 @@ that a previous firmware may have left running across an MCU reset. Missing or
 unexpected IDs receive no writes and do not start a retry loop.
 
 The clock retains a reading for 30 seconds, then shows `--`. The pulse page
-retains the last value and its age. BLE transmits only fresh readings during an
-active measurement; an idle/cached watch value is never replayed as a new phone
+uses large seven-segment digits and `---` without a fresh reading. A small loader fills over an estimated 11.2 seconds, then keeps
+moving if no usable reading has arrived. It never delays a valid result or
+claims the sensor is ready based on elapsed time alone. Only the loader region
+is animated (5 Hz while this page is visible and awaiting a result); the large
+digits and button are redrawn only when their content changes. Detailed signal
+quality remains available in BLE diagnostics rather than on the pulse page.
+BLE transmits only fresh readings during an active measurement; an idle/cached watch value is never replayed as a new phone
 measurement. Stopping or losing a usable signal sends invalid BPM zero, which
 Furu hides. No zero is displayed as an actual pulse.
 
@@ -385,3 +392,24 @@ implemented by `4e2340d`. Spectral concentration near 1800 means approximately
 18x peak/mean, well above the normal 3x cutoff, so it was not itself a failing
 threshold in this trace. It now supplies the additional evidence needed for
 marginal periodicity. This does not establish the person's true heart rate.
+
+## Proposed interval measurement experiment (not enabled)
+
+Start with an opt-in watch setting, off by default: one attempt every five
+minutes, stop immediately after the first valid reading or after 14 seconds
+without one. Keep the manual Measure action and its 45-second limit separate.
+The 11.2-second first result in the successful x2 capture is an observation,
+not a guarantee; poor contact may produce no reading within a 14-second budget.
+Record successful/failed attempts and actual sensor-on duration alongside battery
+telemetry, then compare equivalent overnight runs with interval mode off/on.
+A 14-second ceiling every 300 seconds gives at most 4.7% sensor-on time, not
+4.7% of total watch power. Analog x2 gain does not imply twice the LED current.
+
+Before enabling this mode, move measurement ownership out of page visibility:
+manual measurements stop on navigation/sleep, while scheduled measurements must
+be able to finish with the display off without waking it. OTA and disabling the
+setting must cancel either mode and verify sensor shutdown. Do not schedule
+overlapping attempts or catch up missed intervals in a burst. Mark a stored
+reading with its age; do not send it again as a new live HRS reading on reconnect.
+Reuse the existing settings persistence and include a diagnostic run with missed
+readings, navigation, display sleep, reconnect, reboot and OTA cancellation.
