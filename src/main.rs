@@ -121,7 +121,7 @@ static MOTION_WATCH: Watch<CriticalSectionRawMutex, steps::State, 1> = Watch::ne
 static STEP_DATE: Watch<CriticalSectionRawMutex, Option<chrono::NaiveDate>, 1> = Watch::new();
 static HEART_STATE: Watch<CriticalSectionRawMutex, heart_rate::State, 1> = Watch::new();
 static HEART_DIAGNOSTICS: Watch<CriticalSectionRawMutex, heart_rate::Diagnostics, 1> = Watch::new();
-static HEART_REQUEST: Signal<CriticalSectionRawMutex, bool> = Signal::new();
+static HEART_REQUEST: Signal<CriticalSectionRawMutex, Option<heart_rate::Profile>> = Signal::new();
 static VIBRATIONS: Channel<CriticalSectionRawMutex, haptics::Pattern, 4> = Channel::new();
 static SPI_BUS: StaticCell<BlockingMutex<NoopRawMutex, RefCell<Spim<'static>>>> = StaticCell::new();
 static FLASH_CELL: StaticCell<AsyncMutex<CriticalSectionRawMutex, flash::Flash<FlashSpi>>> =
@@ -527,11 +527,13 @@ async fn heart_task(bus: &'static device::i2c::Bus) {
     sender.send(state);
     HEART_DIAGNOSTICS.sender().send(diagnostic);
     loop {
-        if !HEART_REQUEST.wait().await {
+        let Some(profile) = HEART_REQUEST.wait().await else {
             continue;
-        }
+        };
         diagnostic = heart_rate::Diagnostics::EMPTY;
-        if let Err(error) = sensor.start().await {
+        // Also distinguish repeated failed starts so the UI can acknowledge them.
+        state.started_ms = Instant::now().as_millis();
+        if let Err(error) = sensor.start_profile(profile).await {
             defmt::warn!("[hr] start failed: {:?}", defmt::Debug2Format(&error));
             state.phase = Phase::Fault;
             diagnostic.error = heart_error(&error);
@@ -542,11 +544,14 @@ async fn heart_task(bus: &'static device::i2c::Bus) {
         }
         state.phase = Phase::Measuring;
         state.started_ms = Instant::now().as_millis();
-        diagnostic.gain = hrs3300::MEASUREMENT_GAIN;
+        diagnostic.gain = profile.gain();
+        diagnostic.profile = profile;
         sender.send(state);
         defmt::info!(
-            "[hr] measuring; 15-bit, 10 Hz, gain x{}, 12.5 mA drive; 45 second limit",
-            hrs3300::MEASUREMENT_GAIN
+            "[hr] measuring profile {}; 15-bit, 10 Hz, gain x{}, LED {} deci-mA; 45 second limit",
+            profile as u8,
+            profile.gain(),
+            profile.led_deci_ma()
         );
         let mut estimator = Estimator::new();
         HEART_DIAGNOSTICS.sender().send(diagnostic);
@@ -558,14 +563,14 @@ async fn heart_task(bus: &'static device::i2c::Bus) {
         let mut timed_out = false;
         let mut failed = false;
         loop {
-            if HEART_REQUEST.try_take() == Some(false) {
+            if HEART_REQUEST.try_take() == Some(None) {
                 break;
             }
             match embassy_futures::select::select(HEART_REQUEST.wait(), Timer::at(next_sample))
                 .await
             {
-                embassy_futures::select::Either::First(false) => break,
-                embassy_futures::select::Either::First(true) => continue,
+                embassy_futures::select::Either::First(None) => break,
+                embassy_futures::select::Either::First(Some(_)) => continue,
                 embassy_futures::select::Either::Second(_) => {}
             }
             let now = Instant::now();
@@ -1202,11 +1207,11 @@ async fn main(spawner: Spawner) {
                             | UpdateStatus::Validating
                     ))
             {
-                HEART_REQUEST.signal(start);
+                HEART_REQUEST.signal(start.then(|| watch_ui.heart_profile()));
             }
         }
         if heart_page_was_open && !watch_ui.heart_visible() {
-            HEART_REQUEST.signal(false);
+            HEART_REQUEST.signal(None);
         }
         heart_page_was_open = watch_ui.heart_visible();
         if let Some(request) = watch_ui.take_media_request() {
@@ -1225,7 +1230,7 @@ async fn main(spawner: Spawner) {
         }
         if !awake {
             if !display.is_sleeping() {
-                HEART_REQUEST.signal(false);
+                HEART_REQUEST.signal(None);
                 backlight.off();
                 display.sleep(&mut DeferredDelay).unwrap();
                 SCREEN_AWAKE_WATCH.sender().send(false);

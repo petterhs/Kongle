@@ -72,6 +72,8 @@ ota-activation = ["ota-staging"]
 # Development builds only. Keep this out of release OTA packages: touch
 # scanning during sleep has not been measured for battery impact.
 touch-wake-debug = []
+# Local sensor characterization only; never enabled in release OTA builds.
+hr-test-profiles = []
 # Mount InfiniTime's LittleFS for reboot-persistent battery samples.
 battery-persist-experimental = ["dep:littlefs2"]
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Extract Kongle version-3 optical diagnostics from nRF text or Furu JSON.
+"""Extract Kongle version-3/4 optical diagnostics from nRF text or Furu JSON.
 
 Accepts nRF Connect's hyphenated or space-separated 20-byte payloads. Old
 diagnostic versions have different timestamp semantics and are not guessed.
+Version 4 carries the fixed test profile in the packed high nibble.
 Only measuring frames are exported. Lost samples remain gaps, never fillers.
 """
 
@@ -16,14 +17,22 @@ from pathlib import Path
 
 
 FRAME = re.compile(r"(?<![0-9a-fA-F])(?<![0-9a-fA-F]{2}[- ])([0-9a-fA-F]{2}(?:[- ][0-9a-fA-F]{2}){19})(?![0-9a-fA-F]|[- ][0-9a-fA-F]{2}\b)")
-FIELDS = ["session", "sample", "elapsed_ms", "gain", "ppg", "ambient", "bpm", "error", "minimum", "maximum", "missing_samples"]
+FIELDS = ["session", "sample", "elapsed_ms", "gain", "ppg", "ambient", "bpm", "error", "minimum", "maximum", "missing_samples", "profile", "led_deci_ma"]
 
 
 def decode(payload: bytes) -> dict | None:
-    if len(payload) != 20 or payload[0] != 3 or payload[1] != 1:
+    if len(payload) != 20 or payload[0] not in (3, 4) or payload[1] != 1:
         return None
     packed, ppg, ambient, minimum, maximum, elapsed = struct.unpack_from("<HIIHHH", payload, 4)
-    gain = packed >> 12
+    configuration = packed >> 12
+    if payload[0] == 4:
+        if configuration > 3:
+            return None
+        gain = (2, 4, 2, 4)[configuration]
+        profile, led_deci_ma = configuration, (125, 125, 200, 200)[configuration]
+    else:
+        gain = configuration
+        profile, led_deci_ma = "", ""
     count = packed & 0x0FFF
     if gain not in (1, 2, 4, 8) or ppg > 0x3FFFF or ambient > 0x3FFFF:
         return None
@@ -31,7 +40,7 @@ def decode(payload: bytes) -> dict | None:
         return None
     return dict(sample=count, elapsed_ms=elapsed, gain=gain, ppg=ppg,
                 ambient=ambient, bpm=payload[2], error=payload[3],
-                minimum=minimum, maximum=maximum)
+                minimum=minimum, maximum=maximum, profile=profile, led_deci_ma=led_deci_ma)
 
 
 def extract(text: str) -> list[dict]:

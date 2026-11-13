@@ -203,6 +203,9 @@ pub struct WatchUi {
     heart: crate::heart_rate::State,
     heart_now_ms: u64,
     heart_request: Option<bool>,
+    heart_profile: crate::heart_rate::Profile,
+    heart_profile_changed: bool,
+    heart_start_pending: bool,
     drawn_heart_value: Option<Option<u8>>,
     drawn_heart_phase: Option<crate::heart_rate::Phase>,
     drawn_heart_loading: Option<bool>,
@@ -231,6 +234,9 @@ impl WatchUi {
             heart: crate::heart_rate::State::EMPTY,
             heart_now_ms: 0,
             heart_request: None,
+            heart_profile: crate::heart_rate::Profile::BASELINE,
+            heart_profile_changed: false,
+            heart_start_pending: false,
             drawn_heart_value: None,
             drawn_heart_phase: None,
             drawn_heart_loading: None,
@@ -294,6 +300,18 @@ impl WatchUi {
             || (self.heart_visible()
                 && self.heart.phase == crate::heart_rate::Phase::Measuring
                 && self.heart_now_ms / 200 != now_ms / 200);
+        if state.phase == crate::heart_rate::Phase::Measuring {
+            self.heart_start_pending = false;
+            self.heart_profile_changed = false;
+        }
+        if state != self.heart
+            && matches!(
+                state.phase,
+                crate::heart_rate::Phase::Fault | crate::heart_rate::Phase::Missing
+            )
+        {
+            self.heart_start_pending = false;
+        }
         self.heart = state;
         self.heart_now_ms = now_ms;
         changed
@@ -306,6 +324,18 @@ impl WatchUi {
             && self.heart.bpm(self.heart_now_ms).is_none()
     }
 
+    pub fn heart_profile(&self) -> crate::heart_rate::Profile {
+        self.heart_profile
+    }
+
+    fn displayed_heart_bpm(&self) -> Option<u8> {
+        if self.heart_profile_changed {
+            None
+        } else {
+            self.heart.bpm(self.heart_now_ms)
+        }
+    }
+
     pub fn take_heart_request(&mut self) -> Option<bool> {
         self.heart_request.take()
     }
@@ -313,6 +343,7 @@ impl WatchUi {
     fn stop_heart_on_exit(&mut self) {
         if self.heart_visible() {
             self.heart_request = Some(false);
+            self.heart_start_pending = false;
         }
     }
 
@@ -323,7 +354,7 @@ impl WatchUi {
             .background_color(theme::BACKGROUND)
             .build();
         let mut value: String<20> = String::new();
-        if let Some(bpm) = self.heart.bpm(self.heart_now_ms) {
+        if let Some(bpm) = self.displayed_heart_bpm() {
             let _ = write!(&mut value, "{}", bpm);
         } else {
             let _ = value.push_str("--");
@@ -343,7 +374,7 @@ impl WatchUi {
             }
             Page::HeartRate => {
                 use crate::heart_rate::Phase;
-                let bpm = self.heart.bpm(self.heart_now_ms);
+                let bpm = self.displayed_heart_bpm();
                 // Keep the large digits untouched during loader animation.
                 if self.skip_clear || self.drawn_heart_value != Some(bpm) {
                     if !self.skip_clear {
@@ -391,6 +422,7 @@ impl WatchUi {
                             Text::with_baseline("BPM", Point::new(105, 122), style, Baseline::Top)
                                 .draw(display);
                     }
+                    #[cfg(not(feature = "hr-test-profiles"))]
                     let status = match self.heart.phase {
                         Phase::Measuring if bpm.is_none() => self.tr("Hold still", "Hold deg i ro"),
                         Phase::NoSignal => self.tr("Try again", "Prøv igjen"),
@@ -398,6 +430,15 @@ impl WatchUi {
                         Phase::Fault => self.tr("Sensor error", "Sensorfeil"),
                         _ => "",
                     };
+                    #[cfg(feature = "hr-test-profiles")]
+                    let status = self.heart_profile.label();
+                    #[cfg(feature = "hr-test-profiles")]
+                    let _ = RoundedRectangle::with_equal_corners(
+                        layout::HEART_PROFILE,
+                        Size::new(4, 4),
+                    )
+                    .into_styled(PrimitiveStyle::with_stroke(theme::BORDER, 1))
+                    .draw(display);
                     let x = 120 - status.chars().count() as i32 * 5;
                     let _ = Text::with_baseline(status, Point::new(x, 207), style, Baseline::Top)
                         .draw(display);
@@ -436,7 +477,8 @@ impl WatchUi {
                             .into_styled(PrimitiveStyle::with_fill(theme::BACKGROUND))
                             .draw(display);
                     }
-                    let label = if self.heart.phase == Phase::Measuring {
+                    let label = if self.heart.phase == Phase::Measuring || self.heart_start_pending
+                    {
                         self.tr("Stop", "Stopp")
                     } else {
                         self.tr("Measure", "Mål puls")
@@ -516,9 +558,23 @@ impl WatchUi {
     }
 
     pub fn handle_touch(&mut self, event: TouchEvent) -> bool {
-        if self.heart_visible() && layout::tapped(event, layout::HEART_MEASURE) {
-            self.heart_request = Some(self.heart.phase != crate::heart_rate::Phase::Measuring);
+        #[cfg(feature = "hr-test-profiles")]
+        if self.heart_visible() && layout::tapped(event, layout::HEART_PROFILE) {
+            // Do not mutate acquisition settings or discard a live operation.
+            if self.heart.phase != crate::heart_rate::Phase::Measuring && !self.heart_start_pending
+            {
+                self.heart_profile = self.heart_profile.next();
+                self.heart_profile_changed = true;
+                return true;
+            }
             return false;
+        }
+        if self.heart_visible() && layout::tapped(event, layout::HEART_MEASURE) {
+            let start = self.heart.phase != crate::heart_rate::Phase::Measuring
+                && !self.heart_start_pending;
+            self.heart_start_pending = start;
+            self.heart_request = Some(start);
+            return cfg!(feature = "hr-test-profiles");
         }
         if self.navigation.page() == Page::Media && self.media.available() {
             if let TouchEvent::Tap { x, y: 140..=203 } = event {
@@ -591,6 +647,7 @@ impl WatchUi {
         let changed = self.navigation.handle(event);
         if was_heart && !self.heart_visible() {
             self.heart_request = Some(false);
+            self.heart_start_pending = false;
         }
         if changed && self.navigation.page() == Page::Media {
             self.request_media(crate::media::Command::Open);

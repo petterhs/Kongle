@@ -639,13 +639,33 @@ fn scheduled_jitter_uses_real_beat_times_and_diagnostics_have_a_versioned_layout
         at_ms: 1000,
         error: 0,
         gain: 4,
+        profile: crate::heart_rate::Profile::B,
         quality: crate::heart_rate::Quality::EMPTY,
     };
     let value = diag.encode(state, 1040);
-    assert_eq!(&value[..4], &[3, 1, 72, 0]);
+    assert_eq!(
+        &value[..4],
+        &[
+            if cfg!(feature = "hr-test-profiles") {
+                4
+            } else {
+                3
+            },
+            1,
+            72,
+            0
+        ]
+    );
     let packed = u16::from_le_bytes(value[4..6].try_into().unwrap());
     assert_eq!(packed & 0x0fff, 25);
-    assert_eq!(packed >> 12, 4);
+    assert_eq!(
+        packed >> 12,
+        if cfg!(feature = "hr-test-profiles") {
+            1
+        } else {
+            4
+        }
+    );
     assert_eq!(u32::from_le_bytes(value[6..10].try_into().unwrap()), 12345);
     assert_eq!(u32::from_le_bytes(value[10..14].try_into().unwrap()), 678);
     assert_eq!(u16::from_le_bytes(value[14..16].try_into().unwrap()), 12000);
@@ -770,11 +790,38 @@ mod transport {
             ..crate::heart_rate::Diagnostics::EMPTY
         }
         .encode(crate::heart_rate::State::EMPTY, 0);
-        assert_eq!(u16::from_le_bytes([diag[4], diag[5]]) >> 12, 2);
+        assert_eq!(
+            u16::from_le_bytes([diag[4], diag[5]]) >> 12,
+            if cfg!(feature = "hr-test-profiles") {
+                0
+            } else {
+                2
+            }
+        );
         assert!(run(sensor.sample()).is_ok());
         run(sensor.stop()).unwrap();
         assert_eq!(registers.borrow().values[0x0c], 0);
         assert_eq!(registers.borrow().values[1] & 0x80, 0);
+    }
+
+    #[test]
+    fn fixed_profiles_verify_gain_and_current_then_shut_down() {
+        use crate::heart_rate::Profile;
+        for (profile, gain_bits, drive) in [
+            (Profile::A, 4, 0x2f),
+            (Profile::B, 8, 0x2f),
+            (Profile::C, 4, 0x6f),
+            (Profile::D, 8, 0x6f),
+        ] {
+            let (mut sensor, registers) = fixture();
+            run(sensor.start_profile(profile)).unwrap();
+            assert_eq!(registers.borrow().values[0x17], gain_bits);
+            assert_eq!(registers.borrow().values[0x0c], drive);
+            assert_eq!(registers.borrow().values[0x01], 0xd0);
+            run(sensor.stop()).unwrap();
+            assert_eq!(registers.borrow().values[0x0c], 0);
+            assert_eq!(registers.borrow().values[0x01] & 0x80, 0);
+        }
     }
 
     #[test]

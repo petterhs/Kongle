@@ -6,6 +6,55 @@ pub const SAMPLE_MS: u64 = 100;
 pub const FRESH_MS: u64 = 30_000;
 // Keep conversion range and all filter/window time scales aligned with the
 // 15-bit / 10 Hz reference acquisition. These are not accuracy guarantees.
+/// Fixed acquisition experiments. Profile zero is the unchanged release baseline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Profile {
+    A = 0,
+    B = 1,
+    C = 2,
+    D = 3,
+}
+impl Profile {
+    pub const BASELINE: Self = Self::A;
+    pub const fn gain(self) -> u8 {
+        match self {
+            Self::A | Self::C => 2,
+            Self::B | Self::D => 4,
+        }
+    }
+    pub const fn led_deci_ma(self) -> u16 {
+        match self {
+            Self::A | Self::B => 125,
+            Self::C | Self::D => 200,
+        }
+    }
+    pub const fn driver(self) -> u8 {
+        match self {
+            Self::A | Self::B => 0x2f,
+            Self::C | Self::D => 0x6f,
+        }
+    }
+    #[cfg(feature = "hr-test-profiles")]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::C,
+            Self::C => Self::D,
+            Self::D => Self::A,
+        }
+    }
+    #[cfg(feature = "hr-test-profiles")]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::A => "A x2 12.5mA",
+            Self::B => "B x4 12.5mA",
+            Self::C => "C x2 20mA",
+            Self::D => "D x4 20mA",
+        }
+    }
+}
+
 const ADC_CLIP: u32 = 0x7ff8;
 const WINDOW_SAMPLES: usize = (8000 / SAMPLE_MS) as usize;
 const MIN_SIMILARITY: u16 = 5500;
@@ -96,6 +145,7 @@ pub struct Diagnostics {
     pub at_ms: u64,
     pub error: u8,
     pub gain: u8,
+    pub profile: Profile,
     pub quality: Quality,
 }
 
@@ -109,6 +159,7 @@ impl Diagnostics {
         at_ms: 0,
         error: 0,
         gain: 1,
+        profile: Profile::BASELINE,
         quality: Quality::EMPTY,
     };
 
@@ -116,7 +167,11 @@ impl Diagnostics {
     /// one-second PPG min/max u16 LE, sample elapsed milliseconds u16 LE.
     pub fn encode(self, state: State, now_ms: u64) -> [u8; 20] {
         let mut bytes = [0; 20];
-        bytes[0] = 3;
+        bytes[0] = if cfg!(feature = "hr-test-profiles") {
+            4
+        } else {
+            3
+        };
         bytes[1] = match state.phase {
             Phase::Idle => 0,
             Phase::Measuring => 1,
@@ -126,7 +181,12 @@ impl Diagnostics {
         };
         bytes[2] = state.measurement(now_ms)[1];
         bytes[3] = self.error;
-        let count_and_gain = self.samples.min(0x0fff) | (u16::from(self.gain & 15) << 12);
+        let configuration = if cfg!(feature = "hr-test-profiles") {
+            self.profile as u8
+        } else {
+            self.gain & 15
+        };
+        let count_and_gain = self.samples.min(0x0fff) | (u16::from(configuration) << 12);
         bytes[4..6].copy_from_slice(&count_and_gain.to_le_bytes());
         bytes[6..10].copy_from_slice(&self.ppg.to_le_bytes());
         bytes[10..14].copy_from_slice(&self.ambient.to_le_bytes());

@@ -48,6 +48,13 @@ class HrDiagnosticsTests(unittest.TestCase):
         self.assertEqual([r["session"] for r in rows], [1, 2, 2, 3])
         self.assertEqual(rows[-1]["missing_samples"], 0)
 
+    def test_v4_profiles_preserve_gain_and_current_without_guessing_legacy_current(self):
+        for profile, gain, current in [(0, 2, 125), (1, 4, 125), (2, 2, 200), (3, 4, 200)]:
+            rows = MODULE.extract(frame(1, 100, version=4, gain=profile))
+            self.assertEqual((rows[0]["profile"], rows[0]["gain"], rows[0]["led_deci_ma"]), (profile, gain, current))
+        self.assertEqual(MODULE.extract(frame(1, 100))[0]["led_deci_ma"], "")
+        self.assertEqual(MODULE.extract(frame(1, 100, version=4, gain=4)), [])
+
     def test_old_versions_idle_and_invalid_frames_are_not_interpreted_as_current_timing(self):
         for text in [frame(1, 100, version=1), frame(1, 100, version=2), frame(1, 100, phase=0),
                      frame(1, 65535), frame(1, 100, gain=3), "HR: notification [00 48] -> 72 BPM"]:

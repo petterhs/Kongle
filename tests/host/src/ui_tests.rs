@@ -18,7 +18,10 @@ fn pulse_requires_explicit_start_and_all_page_exits_request_stop() {
         assert!(ui.handle_touch(TouchEvent::Tap { x: 170, y: 180 }));
         assert!(ui.heart_visible());
         assert_eq!(ui.take_heart_request(), None);
-        assert!(!ui.handle_touch(TouchEvent::Tap { x: 50, y: 170 }));
+        assert_eq!(
+            ui.handle_touch(TouchEvent::Tap { x: 50, y: 170 }),
+            cfg!(feature = "hr-test-profiles")
+        );
         assert_eq!(ui.take_heart_request(), Some(true));
         ui.set_heart(
             State {
@@ -570,4 +573,31 @@ fn renderer_fits_pages_and_preserves_screen_during_settings_and_clock_ticks() {
         ui.handle_touch(SwipeDown);
     }
     assert_eq!(frame.clipped, 0, "renderer drew outside 240x240");
+}
+
+#[cfg(feature = "hr-test-profiles")]
+#[test]
+fn pulse_profile_selection_cannot_change_an_active_or_pending_measurement() {
+    use crate::heart_rate::{Phase, Profile, State};
+    let mut ui = WatchUi::new();
+    ui.handle_touch(TouchEvent::Tap { x: 170, y: 180 });
+    for profile in [Profile::B, Profile::C, Profile::D, Profile::A] {
+        assert!(ui.handle_touch(TouchEvent::Tap { x: 100, y: 215 }));
+        assert_eq!(ui.heart_profile(), profile);
+    }
+    ui.handle_touch(TouchEvent::Tap { x: 100, y: 170 });
+    assert!(!ui.handle_touch(TouchEvent::Tap { x: 100, y: 215 }));
+    assert_eq!(ui.heart_profile(), Profile::A);
+    assert_eq!(ui.take_heart_request(), Some(true));
+    assert!(!ui.handle_touch(TouchEvent::Tap { x: 100, y: 215 }));
+    assert_eq!(ui.heart_profile(), Profile::A);
+    ui.set_heart(
+        State {
+            phase: Phase::Measuring,
+            ..State::EMPTY
+        },
+        1000,
+    );
+    assert!(!ui.handle_touch(TouchEvent::Tap { x: 100, y: 215 }));
+    assert_eq!(ui.heart_profile(), Profile::A);
 }

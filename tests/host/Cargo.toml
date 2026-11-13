@@ -6,6 +6,7 @@ publish = false
 
 [features]
 ota-activation = []
+hr-test-profiles = []
 
 [dependencies]
 # Match the firmware lockfile so these tests exercise the same implementations.

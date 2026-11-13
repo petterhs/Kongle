@@ -6,7 +6,6 @@ const ADDRESS: u8 = 0x44;
 /// Controlled x2 acquisition experiment; LED current/integration stay fixed.
 pub const MEASUREMENT_GAIN: u8 = 2;
 const ENABLE_OFF: u8 = 0x50; // 50 ms wait, HEN=0, 12.5 mA drive selection.
-const DRIVER_ON: u8 = 0x2f; // Oscillator on; PineTime's steady-drive low nibble.
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error<E> {
@@ -82,17 +81,25 @@ impl<I: I2c> Hrs3300<I> {
     }
 
     pub async fn start(&mut self) -> Result<(), Error<I::Error>> {
+        self.start_profile(crate::heart_rate::Profile::BASELINE)
+            .await
+    }
+
+    pub async fn start_profile(
+        &mut self,
+        profile: crate::heart_rate::Profile,
+    ) -> Result<(), Error<I::Error>> {
         if !self.recognized {
             self.probe().await?;
         }
         self.running = false;
         self.write(0x01, ENABLE_OFF).await?;
         self.write(0x16, 0x77).await?; // PineTime reference: 15-bit conversion.
-        self.set_gain(MEASUREMENT_GAIN).await?; // Verifies the gain register too.
-        self.write(0x0c, DRIVER_ON).await?;
+        self.set_gain(profile.gain()).await?; // Verifies the gain register too.
+        self.write(0x0c, profile.driver()).await?;
         self.write(0x01, ENABLE_OFF | 0x80).await?;
         self.check(0x01, 0xf8, ENABLE_OFF | 0x80).await?;
-        self.check(0x0c, 0x60, 0x20).await?;
+        self.check(0x0c, 0x60, profile.driver() & 0x60).await?;
         self.check(0x16, 0x0f, 0x07).await?; // Do not require reserved bits to read back.
         self.running = true;
         Ok(())
