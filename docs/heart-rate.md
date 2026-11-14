@@ -1,15 +1,20 @@
 # On-demand HRS3300 pulse prototype
 
-**Current UI test branch: `feature/heart-rate-ui`**, built on the tested
-`test/heart-rate-gain-x2` acquisition experiment. The sensor configuration
-below is unchanged by the UI work. The acquisition experiment changes only
-gain to fixed x2. LED current remains 12.5 mA, resolution 15-bit, conversion wait
-50 ms, sampling 10 Hz and DSP thresholds identical to the x1 baseline `0601db8`.
-The diagnostic gain nibble reports 2 after a successfully verified start.
-Compare a full stationary capture with the baseline using the same fit/posture;
-inspect raw swing, clipping, time to first rate and coverage. Higher gain may
-amplify noise too and is not assumed to improve accuracy. Keep the baseline
-available. Historical reference-acquisition descriptions below refer to x1.
+**Current test branch: `test/heart-rate-tracking`.** Uses fixed profile A:
+x2 gain, 12.5 mA LED drive selection, 15-bit acquisition and 10 Hz sampling.
+There is no profile-selection button or remote configuration command. The earlier
+configurable experiment is preserved on `test/heart-rate-profiles`; it is not
+included in this branch. Current diagnostics remain version 3. Furu's capture
+export still reads and includes the actual firmware version/hash in filenames.
+
+This candidate follows the offline-tested three-confirmation/two-second variant.
+The initial periodicity requirement remains 5500. Once confirmed, a nearby
+candidate may use 4500 only if the previous confirmation is at most 1.5 seconds
+old, the rate differs by at most 6 BPM, and spectral concentration is at least
+1000. The reference follows each confirmed value, while jumps and expiry still
+require confirmation again. Sampling, filters, clipping/coverage safeguards and
+shutdown behavior are unchanged. Captures demonstrate availability, not accuracy;
+further hardware validation is required.
 
 Branch `feature/heart-rate` extends the tested sensor/steps foundation for 0.4.0.
 The development watch's HRS3300 has physically detached. Host/ARM checks cannot
@@ -77,7 +82,7 @@ Every second, a candidate must pass spectral concentration, rejection of
 competing peaks and normalized delayed waveform similarity. Every two-second
 quarter of the window must have at least two raw ADC levels of variation, so an
 old pulse burst cannot keep producing fresh results after the signal goes flat.
-Four consistent candidates spanning at least three seconds are required before
+Three consistent candidates spanning at least two seconds are required before
 publishing: the first reading can arrive after approximately eleven seconds.
 The allowed candidate change remains 10% (minimum 6 BPM). Bounded scheduling
 jitter is linearly resampled onto a 100 ms grid with Q8 precision. A gap greater
@@ -322,7 +327,7 @@ No companion-app changes are required.
 | 8–9 / 10–11 | Analysed windows / qualified readings, saturating counters |
 | 12–13 | Last window's raw ADC peak-to-peak range, not pulse amplitude |
 | 14–15 | Spectral peak/mean concentration multiplied by 100 (minimum 300; minimum 1000 for marginal periodicity) |
-| 16–17 | Delayed waveform similarity on 0–10000 scale (minimum 5500, with stronger spectral evidence below 6500) |
+| 16–17 | Delayed waveform similarity on 0–10000 scale (5500 acquisition; 4500 only for guarded continuation; stronger spectral evidence below 6500) |
 | 18 / 19 | Consistent-candidate count / last input interval in ms (saturated at 255) |
 
 Counters reset only when starting a new measurement. Invalid input and timing
@@ -413,3 +418,20 @@ overlapping attempts or catch up missed intervals in a burst. Mark a stored
 reading with its age; do not send it again as a new live HRS reading on reconnect.
 Reuse the existing settings persistence and include a diagnostic run with missed
 readings, navigation, display sleep, reconnect, reboot and OTA cancellation.
+
+## Fixed-profile tracking candidate
+
+Offline comparison on the A capture: 27 qualified windows with guarded
+continuation and four confirmations became 29 with three confirmations over two
+seconds. First qualification moved from 12.2 to 11.2 seconds; modelled fresh-value
+availability increased from 28.1 to 30.1 seconds. Seven optical captures and the
+synthetic noise/signal-loss sweeps were evaluated locally. The older no-reading
+capture also starts qualifying some values, so this is deliberately less initial
+evidence, not a claim that those values match an independent reference pulse.
+
+Build the OTA trial with the ordinary `mcuboot,ota-activation` features; no
+experiment/profile feature is needed. Default x2/12.5 mA sensor settings are kept.
+The existing loader is an estimated wait and never delays a qualified reading.
+Furu's current test app names version-3 data as legacy gain with LED selection
+unknown (the v3 payload does not encode current); its firmware hash still identifies
+this fixed-profile candidate unambiguously. No new Furu APK is needed.

@@ -83,7 +83,7 @@ fn confirmation_survives_one_marginal_miss_but_expires_and_rechecks_rate() {
     assert_eq!(confirmation.candidate(70, 1000), None);
     assert_eq!(confirmation.candidate(70, 2000), None);
     confirmation.miss(3000);
-    assert_eq!(confirmation.candidate(70, 4000), None); // Still requires 4 good candidates.
+    assert_eq!(confirmation.candidate(70, 4000), Some(70)); // Three candidates spanning at least two seconds.
     assert_eq!(confirmation.candidate(71, 5000), Some(71));
     confirmation.miss(6000);
     confirmation.miss(7000);
@@ -325,9 +325,10 @@ fn isolated_candidates_and_rate_jumps_need_sustained_confirmation() {
         assert_eq!(confirmation.candidate(bpm, at), None);
     }
     let mut confirmation = RateConfirmation::new();
-    for at in [0, 700, 1400, 2100, 2800] {
+    for at in [0, 700, 1400] {
         assert_eq!(confirmation.candidate(88, at), None);
     }
+    assert_eq!(confirmation.candidate(88, 2100), Some(88));
     assert_eq!(confirmation.candidate(88, 3500), Some(88));
     assert_eq!(confirmation.candidate(214, 3800), None);
     assert_eq!(confirmation.candidate(214, 7000), None); // Long gap resets.
@@ -839,4 +840,37 @@ mod transport {
         run(sensor.stop()).unwrap();
         assert_eq!(registers.borrow().values[0x0c], 0);
     }
+}
+
+#[test]
+fn confirmed_rate_tracks_gradual_changes_but_reconfirms_jumps_and_expiry() {
+    use crate::heart_rate::RateConfirmation;
+    let mut rate = RateConfirmation::new();
+    assert_eq!(rate.candidate(90, 1000), None);
+    assert_eq!(rate.candidate(90, 2000), None);
+    assert_eq!(rate.candidate(90, 3000), Some(90));
+    for (index, bpm) in [88, 86, 84, 82, 80, 78, 76, 74, 72, 70]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(rate.candidate(bpm, 4000 + index as u64 * 1000), Some(bpm));
+    }
+    assert_eq!(rate.candidate(140, 14000), None);
+    assert_eq!(rate.candidate(140, 15000), None);
+    assert_eq!(rate.candidate(140, 16000), Some(140));
+    assert_eq!(rate.candidate(140, 20000), None);
+    assert_eq!(rate.candidate(140, 19000), None);
+}
+
+#[test]
+fn three_candidates_still_require_two_seconds_and_a_new_session_reconfirms() {
+    use crate::heart_rate::RateConfirmation;
+    let mut rate = RateConfirmation::new();
+    assert_eq!(rate.candidate(72, 1000), None);
+    assert_eq!(rate.candidate(73, 1500), None);
+    assert_eq!(rate.candidate(74, 1999), None);
+    assert_eq!(rate.candidate(74, 2999), None);
+    assert_eq!(rate.candidate(74, 3000), Some(74));
+    let mut next = RateConfirmation::new();
+    assert_eq!(next.candidate(74, 3100), None);
 }

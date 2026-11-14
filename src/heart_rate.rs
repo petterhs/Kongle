@@ -9,6 +9,9 @@ pub const FRESH_MS: u64 = 30_000;
 const ADC_CLIP: u32 = 0x7ff8;
 const WINDOW_SAMPLES: usize = (8000 / SAMPLE_MS) as usize;
 const MIN_SIMILARITY: u16 = 5500;
+const TRACKING_SIMILARITY: u16 = 4500;
+const CONFIRMATION_COUNT: u8 = 3;
+const CONFIRMATION_SPAN_MS: u64 = 2000;
 const MARGINAL_CONCENTRATION: u16 = 1000; // Weak periodicity needs >=10x peak/mean.
 const MAX_BRIDGE_MS: u64 = 250;
 const MAX_UNCERTAIN_SAMPLES: usize = 4; // At most 5% of an eight-second window.
@@ -251,7 +254,23 @@ impl RateConfirmation {
             self.count = self.count.saturating_add(1);
         }
         self.last_ms = now_ms;
-        (self.count >= 4 && now_ms.saturating_sub(self.first_ms) >= 3000).then_some(bpm)
+        let confirmed = self.count >= CONFIRMATION_COUNT
+            && now_ms.saturating_sub(self.first_ms) >= CONFIRMATION_SPAN_MS;
+        // Follow an established rate rather than comparing gradual changes
+        // forever with the first candidate of the session.
+        if confirmed {
+            self.anchor = bpm;
+        }
+        confirmed.then_some(bpm)
+    }
+
+    fn tracks(&self, bpm: u8, now_ms: u64) -> bool {
+        self.count >= CONFIRMATION_COUNT
+            && self.last_ms.saturating_sub(self.first_ms) >= CONFIRMATION_SPAN_MS
+            && now_ms
+                .checked_sub(self.last_ms)
+                .is_some_and(|age| age <= 1500)
+            && bpm.abs_diff(self.anchor) <= 6
     }
 
     /// One marginal window may interrupt progress, but never produces a
@@ -512,7 +531,18 @@ impl Estimator {
         }
         self.quality.similarity =
             Self::similarity(&wave, (60_000 / peak_bpm) as usize).clamp(0, 10000) as u16;
-        if self.quality.similarity < MIN_SIMILARITY {
+        // Relax only continuation of a recently confirmed nearby rate with
+        // strong spectral evidence. New acquisition retains the strict gate.
+        let maintained = self
+            .confirmation
+            .tracks(self.quality.candidate, self.previous_ms.unwrap_or(0))
+            && self.quality.concentration >= MARGINAL_CONCENTRATION;
+        let minimum = if maintained {
+            TRACKING_SIMILARITY
+        } else {
+            MIN_SIMILARITY
+        };
+        if self.quality.similarity < minimum {
             return self.reject(Reason::NotPeriodic);
         }
         if self.quality.similarity < 6500 && self.quality.concentration < MARGINAL_CONCENTRATION {
@@ -632,5 +662,27 @@ impl Estimator {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tracking_gate_tests {
+    use super::RateConfirmation;
+
+    #[test]
+    fn relaxed_gate_requires_completed_confirmation_nearby_rate_and_fresh_time() {
+        let mut rate = RateConfirmation::new();
+        for at in [1000, 1500, 1999] {
+            assert_eq!(rate.candidate(72, at), None);
+        }
+        // Count alone must not unlock tracking before the two-second span.
+        assert!(!rate.tracks(72, 2000));
+        assert_eq!(rate.candidate(72, 3000), Some(72));
+        assert!(rate.tracks(78, 4500));
+        assert!(!rate.tracks(79, 4500));
+        assert!(!rate.tracks(72, 4501));
+        assert!(!rate.tracks(72, 2999));
+        assert_eq!(rate.candidate(140, 4000), None);
+        assert!(!rate.tracks(140, 4100));
     }
 }
