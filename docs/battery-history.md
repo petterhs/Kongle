@@ -55,8 +55,10 @@ The full-charge ADC conversion is not a voltage calibration against a meter.
 
 ## Validation and further calibration
 
-Compare before/after raw voltage near the observed 3.600 V disconnect and note
-whether the watch actually powers down, resets, or merely loses BLE. Keep the
+Compare before/after raw voltage near the last reported 3.600 V. The maintainer
+found the watch empty roughly an hour after seeing it alive; 3.600 V was the last
+value in Furu, not a measured shutdown voltage. Do not infer a cutoff from it.
+Record whether future failures are power loss, reset, or BLE-only disconnects. Keep the
 initial stable release separate from this untested measurement/model change.
 Host checks cover curve anchors, interpolation, monotonicity, limits, all 101
 percentage values, and ADC conversion; ARM build checks the channel setting.
