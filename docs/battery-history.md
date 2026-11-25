@@ -21,12 +21,56 @@ samples near the same timestamp. No records are deleted on read.
 The RAM ring keeps 512 samples, recorded every five minutes and on charging
 state changes. This covers at least 42 hours at the base cadence, less when
 many charging transitions occur. Furu anchors unsynced uptime samples to
-phone time on reconnect. The percentage estimate now has 1% resolution, using
-the original linear approximation from 0% at 3.2 V to 100% at 4.2 V. It is not
-yet a calibrated lithium-battery curve. The clock, BLE and history all use this
-same estimate; recording every five minutes is independent of its resolution.
-Keep the voltage trend alongside it when assessing battery life and refining
-the curve.
+phone time on reconnect. The percentage has 1% resolution and is interpolated
+between approximate discharge-curve points, rather than mapping 3.2–4.2 V
+linearly. The clock, BLE and new history samples use the same estimate. Raw
+millivolts are retained; previous recorded percentages are not rewritten.
+
+## Percentage model and measurement
+
+The initial reference points are (mV, %): (3500, 0), (3616, 3), (3723, 22),
+(3776, 48), (3979, 79), (4180, 100). These numeric observations come from the
+[InfiniTime 1.16.1 battery controller](https://github.com/InfiniTimeOrg/InfiniTime/blob/1.16.1/src/components/battery/BatteryController.cpp),
+following its [measured discharge-curve work](https://github.com/InfiniTimeOrg/InfiniTime/pull/1444).
+Kongle independently implements bounded integer interpolation. This supplies a
+PineTime-specific starting point, not a curve fitted to this user's battery.
+For example, 3.600 V changes from the old 40% to about 2%; it is not a newly
+introduced shutdown threshold. No low-voltage BLE disconnect or reset is added.
+
+Unlike InfiniTime, this first change does not latch the displayed percentage to
+only decrease while discharging, use its power-present/full-charge pins, or
+assume a measured hours-remaining value. Voltage rebound after load and charging
+voltage can still affect the estimate. A worn battery, temperature, load and
+measurement error can change usable capacity. Better percentage estimation does
+not increase physical runtime or diagnose a disconnect by itself.
+
+The [PineTime divider](https://pine64.org/documentation/PineTime/Hardware/) uses
+two 1 MOhm resistors, equivalent to about 500 kOhm source impedance. The SAADC
+channel now acquires for 40 us, as required for that impedance by
+[Nordic's nRF52832 specification](https://docs.nordicsemi.com/r/bundle/ps_nrf52832/page/saadc.html)
+(10 us supports up to 100 kOhm; 40 us up to 800 kOhm). Gain, reference and
+12-bit resolution remain unchanged. The integer ADC conversion multiplies before
+dividing to retain single-millivolt steps. Sampling/history cadence is unchanged.
+The full-charge ADC conversion is not a voltage calibration against a meter.
+
+## Validation and further calibration
+
+Compare before/after raw voltage near the observed 3.600 V disconnect and note
+whether the watch actually powers down, resets, or merely loses BLE. Keep the
+initial stable release separate from this untested measurement/model change.
+Host checks cover curve anchors, interpolation, monotonicity, limits, all 101
+percentage values, and ADC conversion; ARM build checks the channel setting.
+These checks cannot validate battery capacity or the physical ADC on a watch.
+
+Record several full, uninterrupted discharge runs with the firmware version,
+charging transitions, millivolts and the real last-alive endpoint, ideally on more
+than one device. A disconnect alone must not be labelled empty. Use those runs
+to compare this reference curve with Kongle's measured voltage-versus-time shape.
+For a future time-remaining estimate in Furu, segment at charging/reboots and
+large data gaps, use actual mV history rather than old percentages from a changed
+curve, and report insufficient data until a useful discharge segment exists.
+Linear extrapolation of percentage or voltage across the whole cycle is not a
+reliable lithium-battery runtime model.
 
 `battery-persist-experimental` mounts the existing InfiniTime LittleFS at
 `0x0B4000..0x400000`. It **never formats** the partition. A mount failure

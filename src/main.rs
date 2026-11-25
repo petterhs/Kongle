@@ -560,7 +560,10 @@ async fn main(spawner: Spawner) {
     watch_ui.draw_static(&mut display);
 
     let charge_pin = Input::new(p.P0_12, Pull::Up);
-    let channel = saadc::ChannelConfig::single_ended(p.P0_31);
+    let mut channel = saadc::ChannelConfig::single_ended(p.P0_31);
+    // Two 1 MOhm divider resistors present ~500 kOhm to the ADC. Nordic's
+    // 10 us default supports only 100 kOhm; 40 us supports up to 800 kOhm.
+    channel.time = saadc::Time::_40US;
     let saadc = saadc::Saadc::new(p.SAADC, Irqs, saadc::Config::default(), [channel]);
     let battery = device::battery::Battery::new(saadc, charge_pin);
 
