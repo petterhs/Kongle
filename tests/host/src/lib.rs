@@ -149,18 +149,49 @@ mod tests {
     }
 
     #[test]
-    fn battery_estimate_has_one_percent_steps_and_saturates() {
+    fn battery_curve_follows_reference_points_and_retains_every_percent() {
         use battery_estimate::percent_from_mv;
-        assert_eq!(percent_from_mv(0), 0);
-        assert_eq!(percent_from_mv(3199), 0);
-        for percent in 0..=100u16 {
-            assert_eq!(percent_from_mv(3200 + percent * 10), percent as u8);
+        for (mv, percent) in [
+            (0, 0),
+            (3499, 0),
+            (3500, 0),
+            (3600, 2),
+            (3616, 3),
+            (3723, 22),
+            (3776, 48),
+            (3979, 79),
+            (4180, 100),
+            (4200, 100),
+            (u16::MAX, 100),
+        ] {
+            assert_eq!(percent_from_mv(mv), percent, "{mv} mV");
         }
-        assert_eq!(percent_from_mv(3837), 63);
-        assert_eq!(percent_from_mv(u16::MAX), 100);
-        for mv in 1..=u16::MAX {
-            assert!(percent_from_mv(mv) >= percent_from_mv(mv - 1));
+        // Interpolate within each segment; do not just select the nearest knot.
+        assert_eq!(percent_from_mv(3669), 12);
+        assert_eq!(percent_from_mv(3749), 34);
+        assert_eq!(percent_from_mv(3877), 63);
+        let mut seen = [false; 101];
+        for mv in 0..=u16::MAX {
+            let percent = percent_from_mv(mv);
+            assert!(percent <= 100);
+            seen[percent as usize] = true;
+            if mv > 0 {
+                assert!(percent >= percent_from_mv(mv - 1));
+            }
         }
+        assert!(seen.iter().all(|seen| *seen));
+    }
+
+    #[test]
+    fn battery_adc_conversion_preserves_resolution_and_clamps_adc_codes() {
+        use battery_estimate::millivolts_from_adc;
+        assert_eq!(millivolts_from_adc(i16::MIN), 0);
+        assert_eq!(millivolts_from_adc(0), 0);
+        assert_eq!(millivolts_from_adc(2048), 3600);
+        assert_eq!(millivolts_from_adc(2049), 3601);
+        assert_eq!(millivolts_from_adc(2389), 4199);
+        assert_eq!(millivolts_from_adc(4095), 7198);
+        assert_eq!(millivolts_from_adc(i16::MAX), 7198);
     }
 
     #[test]
